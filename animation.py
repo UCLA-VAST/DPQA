@@ -1,9 +1,11 @@
 from matplotlib.animation import FFMpegWriter, FuncAnimation
+from typing import Sequence, Mapping, Any
 import matplotlib.pyplot as plt
 import json
 import matplotlib
 import networkx as nx
 import argparse
+from abc import ABC, abstractmethod
 
 
 # physics constants
@@ -15,72 +17,193 @@ SLM_SEP = AOD_SEP  # separation of SLMs inside a site
 SITE_WIDTH = 4  # total width of SLMs in a site
 X_SITE_SEP = RYD_SEP + SITE_WIDTH  # separation of sites in X direction
 Y_SITE_SEP = RYD_SEP  # separation of sites in Y direction
-X_WAIT_OFFSET = -1  # x offset when rows finish moving for a stage
-V_MOV = 0.5  # microns per micro seconds
 
 # padding of the figure
-X_LOW_PAD = 2*AOD_SEP
-Y_LOW_PAD = 4*AOD_SEP
-X_HIGH_PAD = 2*AOD_SEP
-Y_HIGH_PAD = 4*AOD_SEP
+X_LOW_PAD = 2 * AOD_SEP
+Y_LOW_PAD = 4 * AOD_SEP
+X_HIGH_PAD = 2 * AOD_SEP
+Y_HIGH_PAD = 4 * AOD_SEP
 
 # constants for animation
 FPS = 24  # frames per second
 INIT_FRM = 24  # initial empty frames
 PT_MICRON = 8  # scaling factor: points per micron
 MUS_PER_FRM = 8  # microseconds per frame
-T_RYDBERG = MUS_PER_FRM*8  # microseconds for Rydberg
-T_ACTIVATE = MUS_PER_FRM  # microseconds for (de)activating AOD
+T_RYDBERG = 0.15  # microseconds for Rydberg
+T_ACTIVATE = 50  # microseconds for (de)activating AOD
 
 
 # class for physical entities: qubits and AOD rows/cols
 
 class Qubit():
-    def __init__(self, id):
+    def __init__(self, id: int):
         self.array = 'SLM'
         self.id = id
-        self.c = -1
-        self.r = -1
-        self.x = -X_LOW_PAD-1
-        self.y = -Y_LOW_PAD-1
+        self.c = -1  # AOD coloumn index
+        self.r = -1  # AOD row index
+        self.x = -X_LOW_PAD-1  # real X coordinates in um
+        self.y = -Y_LOW_PAD-1  # real Y coordinates in um
 
 
 class Row():
-    def __init__(self, id):
+    def __init__(self, id: int):
         self.id = id
         self.active = False
-        self.y = -Y_LOW_PAD-1
+        self.y = -Y_LOW_PAD-1  # real Y coordinates in um
 
 
 class Col():
-    def __init__(self, id):
+    def __init__(self, id: int):
         self.id = id
         self.active = False
-        self.x = -X_LOW_PAD-1
+        self.x = -X_LOW_PAD-1  # real X coordinates in um
 
 
-# class for basic instruction: Init, Move, Activate, Deactivate, Rydberg
+class Inst(ABC):
+    """abstract class of DPQA instructions.
 
+    In general, the __init__ of specific instruction classes looks like
+        def __init__(self, *):
+            super().__init__(*)
+            self.verify(*)
+            self.operate(*)
+            super().write_code(*)
+    """
+
+    def __init__(
+            self,
+            type: str,
+            prefix: str | None = None,
+            stage: int = -1,
+            reduced_keys: Sequence[str] = [],
+    ):
+        """init method for instructions.
+
+        Args:
+            type (str): 
+            prefix (str | None, optional): provide the big operation.
+                this Inst belongs to. Defaults to None.
+            stage (int, optional): stage the Inst belongs to. Defaults to -1.
+            reduced_keys (Sequence[str], optional): data to keep in emit()
+                from emit_full(). Defaults to [].
+        """
+        self.type = type
+        self.name = prefix + ':' + type if prefix else type
+        self.stage = stage
+        self.reduced_keys = reduced_keys + ['type', ]
+        self.duration = -1
+        self.code = {'type': self.type, 'name': self.name, }
+
+    def write_code(
+            self,
+            col_objs: Sequence[Col],
+            row_objs: Sequence[Row],
+            qubit_objs: Sequence[Qubit],
+            data: Mapping[str, Any],
+    ):
+        """write self.code with provided info.
+
+        Args:
+            col_objs (Sequence[Col]): Col objects used.
+            row_objs (Sequence[Row]): Row objects used.
+            qubit_objs (Sequence[Qubit]): Qubit objects used.
+            data (Mapping[str, Any]): other info for the Inst.
+        """
+        for k, v in data.items():
+            self.code[k] = v
+
+        # get the current state of DPQA
+        curr = {}
+        curr['qubits'] = [
+            {
+                'id': q.id,
+                'x': q.x,
+                'y': q.y,
+                'array': q.array,
+                'c': q.c,
+                'r': q.r
+            } for q in qubit_objs
+        ]
+        curr['cols'] = [
+            {
+                'id': c.id,
+                'active': c.active,
+                'x': c.x
+            } for c in col_objs
+        ]
+        curr['rows'] = [
+            {
+                'id': r.id,
+                'active': r.active,
+                'y': r.y
+            } for r in row_objs
+        ]
+        self.code['state'] = curr
+
+    @abstractmethod
+    def verify(self):
+        """verification of instructions. This is abstract because we require
+        each child class to provide its own verification method.
+        """
+        pass
+
+    def operate(self):
+        """perform operation of instructions on Col, Row, and Qubit objects."""
+        pass
+
+    def emit(self) -> Sequence[Mapping[str, Any]]:
+        """emit the minimum code for executing instructions.
+
+        Returns:
+            Sequence[Mapping[str, Any]]: code in a dict.
+        """
+        return ({k: self.code[k] for k in self.reduced_keys}, )
+
+    def emit_full(self) -> Sequence[Mapping[str, Any]]:
+        """emit the code with full info for any purpose.
+
+        Returns:
+            Sequence[Mapping[str, Any]]: code with full info in a dict.
+        """
+        return (self.code, )
+
+    def is_trivial(self) -> bool:
+        return True if self.duration == 0 else False
+
+    def remove_trivial_insts(self):
+        # this is used in ComboInst. Added here for convience.
+        pass
+
+
+# classes for basic instructions: Init, Move, Activate, Deactivate, Rydberg
 # todo: add class Raman (single-qubit gates)
-# todo: add a parent class 'Inst'
 
-class Init():
+
+class Init(Inst):
     def __init__(self,
-                 s: int,
-                 col_objs: list,
-                 row_objs: list,
-                 qubit_objs: list,
-                 slm_qubit_idx: list = [],
-                 slm_qubit_xys: list = [],
-                 aod_qubit_idx: list = [],
-                 aod_qubit_crs: list = [],
-                 aod_col_act_idx: list = [],
-                 aod_col_xs: list = [],
-                 aod_row_act_idx: list = [],
-                 aod_row_ys: list = []):
-        self.type = 'Init'
-        self.name = self.type
-        self.duration = INIT_FRM
+                 col_objs: Sequence[Col],
+                 row_objs: Sequence[Row],
+                 qubit_objs: Sequence[Qubit],
+                 slm_qubit_idx: Sequence[int] = [],
+                 slm_qubit_xys: Sequence[Sequence[int]] = [],
+                 aod_qubit_idx: Sequence[int] = [],
+                 aod_qubit_crs: Sequence[Sequence[int]] = [],
+                 aod_col_act_idx: Sequence[int] = [],
+                 aod_col_xs: Sequence[int] = [],
+                 aod_row_act_idx: Sequence[int] = [],
+                 aod_row_ys: Sequence[int] = [],
+                 data: Mapping[str, Any] = {},):
+        super().__init__(
+            'Init',
+            reduced_keys=[
+                'slm_qubit_idx', 'slm_qubit_xys', 'aod_qubit_idx',
+                'aod_qubit_crs', 'aod_col_act_idx', 'aod_col_xs',
+                'aod_row_act_idx', 'aod_row_ys', 'n_q',
+                'x_high', 'y_high', 'c_high', 'r_high'
+            ]
+        )
+        for k, v in data.items():
+            self.code[k] = v
         self.all_slms = []
         self.verify(slm_qubit_idx,
                     slm_qubit_xys,
@@ -89,8 +212,81 @@ class Init():
                     aod_col_act_idx,
                     aod_col_xs,
                     aod_row_act_idx,
-                    aod_row_ys)
+                    aod_row_ys,)
+        self.operate(col_objs,
+                     row_objs,
+                     qubit_objs,
+                     slm_qubit_idx,
+                     slm_qubit_xys,
+                     aod_qubit_idx,
+                     aod_qubit_crs,
+                     aod_col_act_idx,
+                     aod_col_xs,
+                     aod_row_act_idx,
+                     aod_row_ys,)
+        super().write_code(
+            col_objs,
+            row_objs,
+            qubit_objs,
+            {
+                'duration': INIT_FRM,
+                'slm_qubit_idx': slm_qubit_idx,
+                'slm_qubit_xys': slm_qubit_xys,
+                'aod_qubit_idx': aod_qubit_idx,
+                'aod_qubit_crs': aod_qubit_crs,
+                'aod_col_act_idx': aod_col_act_idx,
+                'aod_col_xs': aod_col_xs,
+                'aod_row_act_idx': aod_row_act_idx,
+                'aod_row_ys': aod_row_ys,
+            })
 
+    def add_slms(self, slms: Sequence[tuple[int, int]]):
+        for slm in slms:
+            if slm not in self.all_slms:
+                self.all_slms.append(slm)
+
+    def verify(
+            self,
+            slm_qubit_idx: Sequence[int],
+            slm_qubit_xys: Sequence[Sequence[int]],
+            aod_qubit_idx: Sequence[int],
+            aod_qubit_crs: Sequence[Sequence[int]],
+            aod_col_act_idx: Sequence[int],
+            aod_col_xs: Sequence[int],
+            aod_row_act_idx: Sequence[int],
+            aod_row_ys: Sequence[int],
+    ):
+        a = len(slm_qubit_idx)
+        b = len(slm_qubit_xys)
+        if a != b:
+            raise ValueError(
+                f'{self.name}: SLM qubit arguments invalid {a} idx, {b} xys.')
+        for i in slm_qubit_xys:
+            if len(i) != 2:
+                raise ValueError(f'{self.name}: SLM qubit xys {i} invalid.')
+        for i in range(len(slm_qubit_xys)):
+            for j in range(i+1, len(slm_qubit_xys)):
+                if slm_qubit_xys[i] == slm_qubit_xys[j]:
+                    raise ValueError(
+                        f'{self.name}: SLM qubits {slm_qubit_idx[i]} '
+                        f'and {slm_qubit_idx[j]} xys are the same.'
+                    )
+        # todo: the case when not all atoms are in SLM
+
+    def operate(
+            self,
+            col_objs: Sequence[Col],
+            row_objs: Sequence[Row],
+            qubit_objs: Sequence[Qubit],
+            slm_qubit_idx: Sequence[int],
+            slm_qubit_xys: Sequence[Sequence[int]],
+            aod_qubit_idx: Sequence[int],
+            aod_qubit_crs: Sequence[Sequence[int]],
+            aod_col_act_idx: Sequence[int],
+            aod_col_xs: Sequence[int],
+            aod_row_act_idx: Sequence[int],
+            aod_row_ys: Sequence[int],
+    ):
         for i, q_id in enumerate(slm_qubit_idx):
             qubit_objs[q_id].array = 'SLM'
             (qubit_objs[q_id].x, qubit_objs[q_id].y) = slm_qubit_xys[i]
@@ -110,105 +306,69 @@ class Init():
             qubit_objs[q_id].x = col_objs[qubit_objs[q_id].c].x
             qubit_objs[q_id].y = row_objs[qubit_objs[q_id].r].y
 
-        self.code = {'type': self.type,
-                     'name': self.name,
-                     'duration': self.duration,
-                     'slm_qubit_idx': slm_qubit_idx,
-                     'slm_qubit_xys': slm_qubit_xys,
-                     'aod_qubit_idx': aod_qubit_idx,
-                     'aod_qubit_crs': aod_qubit_crs,
-                     'aod_col_act_idx': aod_col_act_idx,
-                     'aod_col_xs': aod_col_xs,
-                     'aod_row_act_idx': aod_row_act_idx,
-                     'aod_row_ys': aod_row_ys,
-                     'state': self.state(col_objs, row_objs, qubit_objs)}
-
-    def add_slms(self, slms: list):
-        for slm in slms:
-            if slm not in self.all_slms:
-                self.all_slms.append(slm)
-
-    def state(self, col_objs, row_objs, qubit_objs):
-        curr = {}
-        curr['qubits'] = [{'id': q.id, 'x': q.x, 'y': q.y,
-                           'array': q.array, 'c': q.c, 'r': q.r} for q in qubit_objs]
-        curr['cols'] = [{'id': c.id, 'active': c.active, 'x': c.x}
-                        for c in col_objs]
-        curr['rows'] = [{'id': r.id, 'active': r.active, 'y': r.y}
-                        for r in row_objs]
-        return curr
-
-    def verify(self,
-               slm_qubit_idx: list = [],
-               slm_qubit_xys: list = [],
-               aod_qubit_idx: list = [],
-               aod_qubit_crs: list = [],
-               aod_col_act_idx: list = [],
-               aod_col_xs: list = [],
-               aod_row_act_idx: list = [],
-               aod_row_ys: list = []):
-        a = len(slm_qubit_idx)
-        b = len(slm_qubit_xys)
-        if a != b:
-            raise ValueError(
-                f'{self.name}: SLM qubit arguments invalid {a} idx, {b} xys.')
-        for i in slm_qubit_xys:
-            if len(i) != 2:
-                raise ValueError(f'{self.name}: SLM qubit xys {i} invalid.')
-        for i in range(len(slm_qubit_xys)):
-            for j in range(i+1, len(slm_qubit_xys)):
-                if slm_qubit_xys[i] == slm_qubit_xys[j]:
-                    raise ValueError(
-                        f'{self.name}: SLM qubits {slm_qubit_idx[i]} and {slm_qubit_idx[j]} xys are the same.')
-
-        # todo: if not all qubits in SLM, add checks
-
     def emit_full(self):
+        # all the used SLMs are counted during the whole codegen process,
+        # so the emit_full of Init needs to add this info
         self.code['all_slms'] = self.all_slms
-        return self.code
-
-    def emit(self):
-        raw_code = {}
-        for k in ['type', 'name', 'duration', 'slm_qubit_idx', 'slm_qubit_xys',
-                  'aod_qubit_idx', 'aod_qubit_crs', 'aod_col_act_idx',
-                  'aod_col_xs', 'aod_row_act_idx', 'aod_row_ys', 'n_q',
-                  'x_high', 'y_high', 'c_high', 'r_high']:
-            raw_code[k] = self.code[k]
-        return raw_code
+        return super().emit_full()
 
 
-class Move():
+class Move(Inst):
     def __init__(self,
                  s: int,
-                 col_objs: list,
-                 row_objs: list,
-                 qubit_objs: list,
-                 col_idx: list = [],
-                 col_begin: list = [],
-                 col_end: list = [],
-                 row_idx: list = [],
-                 row_begin: list = [],
-                 row_end: list = [],
+                 col_objs: Sequence[Col],
+                 row_objs: Sequence[Row],
+                 qubit_objs: Sequence[Qubit],
+                 col_idx: Sequence[int] = [],
+                 col_begin: Sequence[int] = [],
+                 col_end: Sequence[int] = [],
+                 row_idx: Sequence[int] = [],
+                 row_begin: Sequence[int] = [],
+                 row_end: Sequence[int] = [],
                  prefix: str = ''):
-        self.type = 'Move'
-        self.stage = s
-        self.name = prefix + ':' + self.type
-        self.col_idx = col_idx
-        self.col_begin = col_begin
-        self.col_end = col_end
-        self.row_idx = row_idx
-        self.row_begin = row_begin
-        self.row_end = row_end
-        self.verify(col_objs, row_objs)
+        super().__init__('Move', prefix=prefix, stage=s)
+        self.verify(
+            col_objs,
+            row_objs,
+            col_idx,
+            col_begin,
+            col_end,
+            row_idx,
+            row_begin,
+            row_end,
+        )
+        data = self.operate(
+            col_objs,
+            row_objs,
+            qubit_objs,
+            col_idx,
+            col_begin,
+            col_end,
+            row_idx,
+            row_begin,
+            row_end,)
+        super().write_code(col_objs, row_objs, qubit_objs, data)
 
-        self.code = {'type': self.type, 'name': self.name}
-
-        self.code['cols'] = []
+    def operate(
+            self,
+            col_objs: Sequence[Col],
+            row_objs: Sequence[Row],
+            qubit_objs: Sequence[Qubit],
+            col_idx: Sequence[int],
+            col_begin: Sequence[int],
+            col_end: Sequence[int],
+            row_idx: Sequence[int],
+            row_begin: Sequence[int],
+            row_end: Sequence[int],
+    ) -> Mapping[str, Any]:
+        data = {}
+        # calculate the max  move distance of columns
+        data['cols'] = []
         max_distance = 0
-        for i in range(len(self.col_idx)):
+        for i in range(len(col_idx)):
             distance = abs(col_end[i]-col_begin[i])
             if distance > 0:
-                self.code['cols'].append(
+                data['cols'].append(
                     {'id': col_idx[i],
                      'shift': col_end[i]-col_begin[i],
                      'begin': col_begin[i],
@@ -216,11 +376,12 @@ class Move():
                 col_objs[col_idx[i]].x = col_end[i]
                 max_distance = max(max_distance, distance)
 
-        self.code['rows'] = []
-        for i in range(len(self.row_idx)):
+        # calculate the max  move distance of rows
+        data['rows'] = []
+        for i in range(len(row_idx)):
             distance = abs(row_end[i]-row_begin[i])
             if distance > 0:
-                self.code['rows'].append(
+                data['rows'].append(
                     {'id': row_idx[i],
                      'shift': row_end[i]-row_begin[i],
                      'begin': row_begin[i],
@@ -228,359 +389,455 @@ class Move():
                 row_objs[row_idx[i]].y = row_end[i]
                 max_distance = max(max_distance, distance)
 
-        self.code['duration'] = 200*((max_distance/110)**(1/2))
+        # movement time per Bluvstein et al. units are us and um.
+        self.duration = 200*((max_distance/110)**(1/2))
+        data['duration'] = self.duration
 
         for qubit_obj in qubit_objs:
             if qubit_obj.array == 'AOD':
                 qubit_obj.x = col_objs[qubit_obj.c].x
                 qubit_obj.y = row_objs[qubit_obj.r].y
 
-        self.code['state'] = self.state(col_objs, row_objs, qubit_objs)
+        return data
 
-    def state(self, col_objs, row_objs, qubit_objs):
-        curr = {}
-        curr['qubits'] = [{'id': q.id, 'x': q.x, 'y': q.y,
-                           'array': q.array, 'c': q.c, 'r': q.r} for q in qubit_objs]
-        curr['cols'] = [{'id': c.id, 'active': c.active, 'x': c.x}
-                        for c in col_objs]
-        curr['rows'] = [{'id': r.id, 'active': r.active, 'y': r.y}
-                        for r in row_objs]
-        return curr
-
-    def verify(self, col_objs, row_objs):
-        a = len(self.col_idx)
-        b = len(self.col_begin)
-        c = len(self.col_end)
+    def verify(
+            self,
+            col_objs: Sequence[Col],
+            row_objs: Sequence[Row],
+            col_idx: Sequence[int],
+            col_begin: Sequence[int],
+            col_end: Sequence[int],
+            row_idx: Sequence[int],
+            row_begin: Sequence[int],
+            row_end: Sequence[int],
+    ):
+        a = len(col_idx)
+        b = len(col_begin)
+        c = len(col_end)
         if not (a == b and a == c):
             raise ValueError(
-                f'{self.name}: col arguments invalid {a} idx, {b} begin, {c} end.')
-        a = len(self.row_idx)
-        b = len(self.row_begin)
-        c = len(self.row_end)
+                f'{self.name}: col arguments invalid'
+                f' {a} idx, {b} begin, {c} end.'
+            )
+        a = len(row_idx)
+        b = len(row_begin)
+        c = len(row_end)
         if not (a == b and a == c):
             raise ValueError(
-                f'{self.name}: row arguments invalid {a} idx, {b} begin, {c} end.')
+                f'{self.name}: row arguments invalid'
+                f' {a} idx, {b} begin, {c} end.'
+            )
 
         activated_col_idx = []
         activated_col_xs = []
         for col_obj in col_objs:
             if col_obj.active:
-                if activated_col_idx and col_obj.x < activated_col_xs[-1]+AOD_SEP:
+                if (activated_col_idx
+                        and col_obj.x < activated_col_xs[-1] + AOD_SEP):
                     raise ValueError(
-                        f'{self.name}: col beginning position invalid col {col_obj.id} at x={col_obj.x} while col {activated_col_idx[-1]} at x={activated_col_xs[-1]}.')
+                        f'{self.name}: col beginning position invalid'
+                        f' col {col_obj.id} at x={col_obj.x} while '
+                        f'col {activated_col_idx[-1]} at'
+                        f' x={activated_col_xs[-1]}.'
+                    )
                 activated_col_idx.append(col_obj.id)
                 activated_col_xs.append(col_obj.x)
-        for i, moving_col_id in enumerate(self.col_idx):
+        for i, moving_col_id in enumerate(col_idx):
             if moving_col_id not in activated_col_idx:
                 raise ValueError(
-                    f'{self.name}: col {moving_col_id} to move is not activated.')
+                    f'{self.name}: col {moving_col_id} to move'
+                    f' is not activated.'
+                )
             j = activated_col_idx.index(moving_col_id)
-            if self.col_begin[i] != activated_col_xs[j]:
+            if col_begin[i] != activated_col_xs[j]:
                 raise ValueError(
                     f'{self.name}: col {moving_col_id} beginning x not agree.')
-            activated_col_xs[j] = self.col_end[i]
+            activated_col_xs[j] = col_end[i]
         for i in range(1, len(activated_col_xs)):
-            if activated_col_xs[i-1]+AOD_SEP > activated_col_xs[i]:
+            if activated_col_xs[i - 1] + AOD_SEP > activated_col_xs[i]:
                 raise ValueError(
-                    f'{self.name}: col ending position invalid col {activated_col_idx[i-1]} at x={activated_col_xs[i-1]} while col {activated_col_idx[i]} at x={activated_col_xs[i]}.')
+                    f'{self.name}: col ending position invalid'
+                    f' col {activated_col_idx[i-1]} at '
+                    f'x={activated_col_xs[i-1]} while '
+                    f'col {activated_col_idx[i]} at x={activated_col_xs[i]}.')
 
         activated_row_idx = []
         activated_row_ys = []
         for row_obj in row_objs:
             if row_obj.active:
-                if activated_row_idx and row_obj.y < activated_row_ys[-1] + AOD_SEP:
+                if (activated_row_idx
+                        and row_obj.y < activated_row_ys[-1] + AOD_SEP):
                     raise ValueError(
-                        f'{self.name}: row beginning position invalid row {row_obj.id} at y={row_obj.y} while row {activated_row_idx[-1]} at y={activated_row_ys[-1]}.')
+                        f'{self.name}: row beginning position invalid '
+                        f'row {row_obj.id} at y={row_obj.y} while '
+                        f'row {activated_row_idx[-1]} at '
+                        f'y={activated_row_ys[-1]}.'
+                    )
                 activated_row_idx.append(row_obj.id)
                 activated_row_ys.append(row_obj.y)
-        for i, moving_row_id in enumerate(self.row_idx):
+        for i, moving_row_id in enumerate(row_idx):
             if moving_row_id not in activated_row_idx:
                 raise ValueError(
-                    f'{self.name}: row {moving_row_id} to move is not activated.')
+                    f'{self.name}: row {moving_row_id} to move '
+                    f'is not activated.'
+                )
             j = activated_row_idx.index(moving_row_id)
-            if self.row_begin[i] != activated_row_ys[j]:
+            if row_begin[i] != activated_row_ys[j]:
                 raise ValueError(
                     f'{self.name}: row {moving_row_id} beginning y not agree.')
-            activated_row_ys[j] = self.row_end[i]
+            activated_row_ys[j] = row_end[i]
         for i in range(1, len(activated_row_ys)):
-            if activated_row_ys[i-1]+AOD_SEP > activated_row_ys[i]:
+            if activated_row_ys[i - 1] + AOD_SEP > activated_row_ys[i]:
                 raise ValueError(
-                    f'{self.name}: row ending position invalid row {activated_row_idx[i-1]} at y={activated_row_ys[i-1]} while row {activated_row_idx[i]} at y={activated_row_ys[i]}.')
-
-    def emit_full(self):
-        return self.code
+                    f'{self.name}: row ending position invalid '
+                    f'row {activated_row_idx[i-1]} at '
+                    f'y={activated_row_ys[i-1]} while '
+                    f'row {activated_row_idx[i]} at y={activated_row_ys[i]}.')
 
     def emit(self):
-        raw_code = {'type': self.type}
-        raw_code['cols'] = [{k: v for k, v in tmp.items() if k in [
+        code = {'type': self.type}
+        code['cols'] = [{k: v for k, v in tmp.items() if k in [
             'id', 'shift']} for tmp in self.code['cols']]
-        raw_code['rows'] = [{k: v for k, v in tmp.items() if k in [
+        code['rows'] = [{k: v for k, v in tmp.items() if k in [
             'id', 'shift']} for tmp in self.code['rows']]
-        return raw_code
+        return (code,)
 
 
-class Activate():
+class Activate(Inst):
     def __init__(self,
                  s: int,
-                 col_objs: list,
-                 row_objs: list,
-                 qubit_objs: list,
-                 col_idx: list = [],
-                 col_xs: list = [],
-                 row_idx: list = [],
-                 row_ys: list = [],
-                 pickup_qs: list = [],
-                 prefix: str = ''):
-        self.stage = s
-        self.type = 'Activate'
-        self.name = prefix + ':' + self.type
-        self.col_idx = col_idx
-        self.col_xs = col_xs
-        self.row_idx = row_idx
-        self.row_ys = row_ys
-        self.pickup_qs = pickup_qs
-        self.duration = T_ACTIVATE
+                 col_objs: Sequence[Col],
+                 row_objs: Sequence[Row],
+                 qubit_objs: Sequence[Qubit],
+                 col_idx: Sequence[int] = [],
+                 col_xs: Sequence[int] = [],
+                 row_idx: Sequence[int] = [],
+                 row_ys: Sequence[int] = [],
+                 pickup_qs: Sequence[int] = [],
+                 prefix: str = '',):
+        super().__init__(
+            'Activate',
+            prefix=prefix,
+            stage=s,
+            reduced_keys=['col_idx', 'col_xs', 'row_idx', 'row_ys']
+        )
+        self.verify(
+            col_objs,
+            row_objs,
+            qubit_objs,
+            col_idx,
+            col_xs,
+            row_idx,
+            row_ys,
+            pickup_qs,
+        )
+        self.operate(
+            col_objs,
+            row_objs,
+            qubit_objs,
+            col_idx,
+            col_xs,
+            row_idx,
+            row_ys,
+            pickup_qs,
+        )
+        super().write_code(
+            col_objs,
+            row_objs,
+            qubit_objs,
+            {
+                'col_idx': col_idx,
+                'col_xs': col_xs,
+                'row_idx': row_idx,
+                'row_ys': row_ys,
+                'pickup_qs': pickup_qs,
+                'duration': T_ACTIVATE
+            }
+        )
 
-        self.verify(col_objs, row_objs, qubit_objs)
-        self.code = {'type': self.type,
-                     'name': self.name,
-                     'col_idx': self.col_idx,
-                     'col_xs': self.col_xs,
-                     'row_idx': self.row_idx,
-                     'row_ys': self.row_ys,
-                     'pickup_qs': self.pickup_qs,
-                     'duration': self.duration}
-
-        for i in range(len(self.col_idx)):
-            col_objs[self.col_idx[i]].active = True
-            col_objs[self.col_idx[i]].x = self.col_xs[i]
-        for i in range(len(self.row_idx)):
-            row_objs[self.row_idx[i]].active = True
-            row_objs[self.row_idx[i]].y = self.row_ys[i]
-        for q_id in self.pickup_qs:
+    def operate(
+            self,
+            col_objs: Sequence[Col],
+            row_objs: Sequence[Row],
+            qubit_objs: Sequence[Qubit],
+            col_idx: Sequence[int],
+            col_xs: Sequence[int],
+            row_idx: Sequence[int],
+            row_ys: Sequence[int],
+            pickup_qs: Sequence[int],
+    ):
+        for i in range(len(col_idx)):
+            col_objs[col_idx[i]].active = True
+            col_objs[col_idx[i]].x = col_xs[i]
+        for i in range(len(row_idx)):
+            row_objs[row_idx[i]].active = True
+            row_objs[row_idx[i]].y = row_ys[i]
+        for q_id in pickup_qs:
             qubit_objs[q_id].array = 'AOD'
-        self.code['state'] = self.state(col_objs, row_objs, qubit_objs)
 
-    def state(self, col_objs, row_objs, qubit_objs):
-        curr = {}
-        curr['qubits'] = [{'id': q.id, 'x': q.x, 'y': q.y,
-                           'array': q.array, 'c': q.c, 'r': q.r} for q in qubit_objs]
-        curr['cols'] = [{'id': c.id, 'active': c.active, 'x': c.x}
-                        for c in col_objs]
-        curr['rows'] = [{'id': r.id, 'active': r.active, 'y': r.y}
-                        for r in row_objs]
-        return curr
-
-    def verify(self, col_objs: list, row_objs: list, qubit_objs: list):
-        a = len(self.col_idx)
-        b = len(self.col_xs)
+    def verify(
+            self,
+            col_objs: Sequence[Col],
+            row_objs: Sequence[Row],
+            qubit_objs: Sequence[Qubit],
+            col_idx: Sequence[int],
+            col_xs: Sequence[int],
+            row_idx: Sequence[int],
+            row_ys: Sequence[int],
+            pickup_qs: Sequence[int],
+    ):
+        a = len(col_idx)
+        b = len(col_xs)
         if a != b:
             raise ValueError(
                 f'{self.name}: col arguments invalid {a} idx, {b} xs')
-        a = len(self.row_idx)
-        b = len(self.row_ys)
+        a = len(row_idx)
+        b = len(row_ys)
         if a != b:
             raise ValueError(
                 f'f{self.name}: row arguments invalid {a} idx, {b} ys.')
 
-        for i in range(len(self.col_idx)):
-            if col_objs[self.col_idx[i]].active:
+        for i in range(len(col_idx)):
+            if col_objs[col_idx[i]].active:
                 raise ValueError(
-                    f'{self.name}: col {self.col_idx[i]} already activated.')
-            for j in range(self.col_idx[i]):
-                if col_objs[j].active and col_objs[j].x > self.col_xs[i]-AOD_SEP:
+                    f'{self.name}: col {col_idx[i]} already activated.')
+            for j in range(col_idx[i]):
+                if (col_objs[j].active
+                        and col_objs[j].x > col_xs[i] - AOD_SEP):
                     raise ValueError(
-                        f'{self.name}: col {j} at x={col_objs[j].x} is too left for col {self.col_idx[i]} to activate at x={self.col_xs[i]}.')
-            for j in range(self.col_idx[i]+1, len(col_objs)):
-                if col_objs[j].active and col_objs[j].x-AOD_SEP < self.col_xs[i]:
+                        f'{self.name}: col {j} at x={col_objs[j].x} is '
+                        f'too left for col {col_idx[i]}'
+                        f' to activate at x={col_xs[i]}.'
+                    )
+            for j in range(col_idx[i] + 1, len(col_objs)):
+                if (col_objs[j].active
+                        and col_objs[j].x - AOD_SEP < col_xs[i]):
                     raise ValueError(
-                        f'{self.name}: col {j} at x={col_objs[j].x} is too right for col {self.col_idx[i]} to activate at x={self.col_xs[i]}.')
-        for i in range(len(self.row_idx)):
-            if row_objs[self.row_idx[i]].active:
+                        f'{self.name}: col {j} at x={col_objs[j].x} is '
+                        f'too right for col {col_idx[i]} '
+                        f'to activate at x={col_xs[i]}.'
+                    )
+        for i in range(len(row_idx)):
+            if row_objs[row_idx[i]].active:
                 raise ValueError(
-                    f'{self.name}: row {self.row_idx[i]} already activated.')
-            for j in range(self.row_idx[i]):
-                if row_objs[j].active and row_objs[j].y > self.row_ys[i]-AOD_SEP:
+                    f'{self.name}: row {row_idx[i]} already activated.')
+            for j in range(row_idx[i]):
+                if (row_objs[j].active
+                        and row_objs[j].y > row_ys[i] - AOD_SEP):
                     raise ValueError(
-                        f'{self.name}: row {j} at y={row_objs[j].y} is too high for row {self.row_idx[i]} to activate at y={self.row_ys[i]}.')
-            for j in range(self.row_idx[i]+1, len(row_objs)):
-                if row_objs[j].active and row_objs[j].y-AOD_SEP < self.row_ys[i]:
+                        f'{self.name}: row {j} at y={row_objs[j].y} is '
+                        f'too high for row {row_idx[i]} '
+                        f'to activate at y={row_ys[i]}.'
+                    )
+            for j in range(row_idx[i] + 1, len(row_objs)):
+                if (row_objs[j].active
+                        and row_objs[j].y-AOD_SEP < row_ys[i]):
                     raise ValueError(
-                        f'{self.name}: row {j} at y={col_objs[j].y} is too low for row {self.row_idx[i]} to activate at y={self.row_ys[i]}.')
+                        f'{self.name}: row {j} at y={col_objs[j].y} is '
+                        f'too low for row {row_idx[i]} '
+                        f'to activate at y={row_ys[i]}.'
+                    )
 
         active_xys = []  # the traps that are newly activted by this Activate
         active_xs = [col.x for col in col_objs if col.active]
         active_ys = [row.y for row in row_objs if row.active]
         for x in active_xs:
-            for y in self.row_ys:
+            for y in row_ys:
                 active_xys.append((x, y))
         for y in active_ys:
-            for x in self.col_xs:
+            for x in col_xs:
                 active_xys.append((x, y))
-        for x in self.col_xs:
-            for y in self.row_ys:
+        for x in col_xs:
+            for y in row_ys:
                 active_xys.append((x, y))
 
         for q_id in range(len(qubit_objs)):
-            if q_id in self.pickup_qs:
+            if q_id in pickup_qs:
                 if (qubit_objs[q_id].x, qubit_objs[q_id].y) not in active_xys:
                     raise ValueError(
-                        f'{self.name}: q {q_id} not picked up by col {qubit_objs[q_id].c} row {qubit_objs[q_id].r} at x={qubit_objs[q_id].x} y={qubit_objs[q_id].y}.')
+                        f'{self.name}: q {q_id} not picked up '
+                        f'by col {qubit_objs[q_id].c} '
+                        f'row {qubit_objs[q_id].r} at '
+                        f'x={qubit_objs[q_id].x} y={qubit_objs[q_id].y}.'
+                    )
             else:
                 if (qubit_objs[q_id].x, qubit_objs[q_id].y) in active_xys:
                     raise ValueError(
-                        f'{self.name}: q {q_id} wrongfully picked up by col {qubit_objs[q_id].c} row {qubit_objs[q_id].r} at x={qubit_objs[q_id].x} y={qubit_objs[q_id].y}.')
-
-    def emit_full(self):
-        return self.code
-
-    def emit(self):
-        return {k: v for k, v in self.code.items() if k in ['type',
-                                                            'col_idx',
-                                                            'row_idx']}
+                        f'{self.name}: q {q_id} wrongfully picked up by '
+                        f'col {qubit_objs[q_id].c} row {qubit_objs[q_id].r}'
+                        f' at x={qubit_objs[q_id].x} y={qubit_objs[q_id].y}.')
 
 
-class Deactivate():
+class Deactivate(Inst):
     def __init__(self,
                  s: int,
-                 col_objs: list,
-                 row_objs: list,
-                 qubit_objs: list,
-                 col_idx: list = [],
-                 col_xs: list = [],
-                 row_idx: list = [],
-                 row_ys: list = [],
-                 dropoff_qs: list = [],
-                 prefix: str = ''):
-        self.stage = s
-        self.type = 'Deactivate'
-        self.name = prefix + ':' + self.type
-        self.col_idx = col_idx
-        self.col_xs = col_xs
-        self.row_idx = row_idx
-        self.row_ys = row_ys
-        self.dropoff_qs = dropoff_qs
-        self.duration = T_ACTIVATE
+                 col_objs: Sequence[Col],
+                 row_objs: Sequence[Row],
+                 qubit_objs: Sequence[Qubit],
+                 col_idx: Sequence[int] = [],
+                 col_xs: Sequence[int] = [],
+                 row_idx: Sequence[int] = [],
+                 row_ys: Sequence[int] = [],
+                 dropoff_qs: Sequence[int] = [],
+                 prefix: str = '',):
+        super().__init__(
+            'Deactivate',
+            prefix=prefix,
+            stage=s,
+            reduced_keys=['col_idx', 'row_idx']
+        )
+        self.verify(
+            col_objs,
+            row_objs,
+            qubit_objs,
+            col_idx,
+            col_xs,
+            row_idx,
+            row_ys,
+            dropoff_qs
+        )
+        self.operate(
+            col_objs,
+            row_objs,
+            qubit_objs,
+            col_idx,
+            row_idx,
+            dropoff_qs
+        )
+        super().write_code(
+            col_objs,
+            row_objs,
+            qubit_objs,
+            {
+                'col_idx': col_idx,
+                'col_xs': col_xs,
+                'row_idx': row_idx,
+                'row_ys': row_ys,
+                'dropoff_qs': dropoff_qs,
+                'duration': T_ACTIVATE
+            }
+        )
 
-        self.verify(col_objs, row_objs, qubit_objs)
-        self.code = {'type': self.type,
-                     'name': self.name,
-                     'col_idx': self.col_idx,
-                     'col_xs': self.col_xs,
-                     'row_idx': self.row_idx,
-                     'row_ys': self.row_ys,
-                     'dropoff_qs': self.dropoff_qs,
-                     'duration': self.duration}
-
-        for i in range(len(self.col_idx)):
-            col_objs[self.col_idx[i]].active = False
-        for i in range(len(self.row_idx)):
-            row_objs[self.row_idx[i]].active = False
-        for q_id in self.dropoff_qs:
+    def operate(
+        self,
+        col_objs: Sequence[Col],
+        row_objs: Sequence[Row],
+        qubit_objs: Sequence[Qubit],
+        col_idx: Sequence[int],
+        row_idx: Sequence[int],
+        dropoff_qs: Sequence[int],
+    ):
+        for i in range(len(col_idx)):
+            col_objs[col_idx[i]].active = False
+        for i in range(len(row_idx)):
+            row_objs[row_idx[i]].active = False
+        for q_id in dropoff_qs:
             qubit_objs[q_id].array = 'SLM'
-        self.code['state'] = self.state(col_objs, row_objs, qubit_objs)
 
-    def state(self, col_objs, row_objs, qubit_objs):
-        curr = {}
-        curr['qubits'] = [{'id': q.id, 'x': q.x, 'y': q.y,
-                           'array': q.array, 'c': q.c, 'r': q.r} for q in qubit_objs]
-        curr['cols'] = [{'id': c.id, 'active': c.active, 'x': c.x}
-                        for c in col_objs]
-        curr['rows'] = [{'id': r.id, 'active': r.active, 'y': r.y}
-                        for r in row_objs]
-        return curr
-
-    def verify(self, col_objs: list, row_objs: list, qubit_objs: list):
-        a = len(self.col_idx)
-        b = len(self.col_xs)
+    def verify(
+            self,
+            col_objs: Sequence[Col],
+            row_objs: Sequence[Row],
+            qubit_objs: Sequence[Qubit],
+            col_idx: Sequence[int],
+            col_xs: Sequence[int],
+            row_idx: Sequence[int],
+            row_ys: Sequence[int],
+            dropoff_qs: Sequence[int],
+    ):
+        a = len(col_idx)
+        b = len(col_xs)
         if a != b:
             raise ValueError(
                 f'{self.name}: col arguments invalid {a} idx, {b} xs')
-        a = len(self.row_idx)
-        b = len(self.row_ys)
+        a = len(row_idx)
+        b = len(row_ys)
         if a != b:
             raise ValueError(
-                f'f{self.name}: row arguments invalid {a} idx, {b} ys.')
+                f'{self.name}: row arguments invalid {a} idx, {b} ys.')
 
-        for i in range(len(self.col_idx)):
-            if not col_objs[self.col_idx[i]].active:
+        for i in range(len(col_idx)):
+            if not col_objs[col_idx[i]].active:
                 raise ValueError(
-                    f'{self.name}: col {self.col_idx[i]} already dectivated.')
-            for j in range(self.col_idx[i]):
-                if col_objs[j].active and col_objs[j].x > self.col_xs[i]-AOD_SEP:
+                    f'{self.name}: col {col_idx[i]} already dectivated.')
+            for j in range(col_idx[i]):
+                if (col_objs[j].active
+                        and col_objs[j].x > col_xs[i] - AOD_SEP):
                     raise ValueError(
-                        f'{self.name}: col {j} at x={col_objs[j].x} is too left for col {self.col_idx[i]} to deactivate at x={self.col_xs[i]}.')
-            for j in range(self.col_idx[i]+1, len(col_objs)):
-                if col_objs[j].active and col_objs[j].x-AOD_SEP < self.col_xs[i]:
+                        f'{self.name}: col {j} at x={col_objs[j].x} is '
+                        f'too left for col {col_idx[i]} '
+                        f'to deactivate at x={col_xs[i]}.')
+            for j in range(col_idx[i]+1, len(col_objs)):
+                if (col_objs[j].active
+                        and col_objs[j].x - AOD_SEP < col_xs[i]):
                     raise ValueError(
-                        f'{self.name}: col {j} at x={col_objs[j].x} is too right for col {self.col_idx[i]} to deactivate at x={self.col_xs[i]}.')
-        for i in range(len(self.row_idx)):
-            if not row_objs[self.row_idx[i]].active:
+                        f'{self.name}: col {j} at x={col_objs[j].x} is '
+                        f'too right for col {col_idx[i]} '
+                        f'to deactivate at x={col_xs[i]}.')
+        for i in range(len(row_idx)):
+            if not row_objs[row_idx[i]].active:
                 raise ValueError(
-                    f'{self.name}: row {self.row_idx[i]} already deactivated.')
-            for j in range(self.row_idx[i]):
-                if row_objs[j].active and row_objs[j].y > self.row_ys[i]-AOD_SEP:
+                    f'{self.name}: row {row_idx[i]} already deactivated.')
+            for j in range(row_idx[i]):
+                if (row_objs[j].active
+                        and row_objs[j].y > row_ys[i] - AOD_SEP):
                     raise ValueError(
-                        f'{self.name}: row {j} at y={row_objs[j].y} is too high for row {self.row_idx[i]} to deactivate at y={self.row_ys[i]}.')
-            for j in range(self.row_idx[i]+1, len(row_objs)):
-                if row_objs[j].active and row_objs[j].y-AOD_SEP < self.row_ys[i]:
+                        f'{self.name}: row {j} at y={row_objs[j].y} is '
+                        f'too high for row {row_idx[i]} '
+                        f'to deactivate at y={row_ys[i]}.'
+                    )
+            for j in range(row_idx[i]+1, len(row_objs)):
+                if (row_objs[j].active
+                        and row_objs[j].y-AOD_SEP < row_ys[i]):
                     raise ValueError(
-                        f'{self.name}: row {j} at y={col_objs[j].y} is too low for row {self.row_idx[i]} to deactivate at y={self.row_ys[i]}.')
+                        f'{self.name}: row {j} at y={col_objs[j].y} is '
+                        f'too low for row {row_idx[i]} '
+                        f'to deactivate at y={row_ys[i]}.'
+                    )
 
         deactive_xys = []
         active_xs = [col.x for col in col_objs if col.active]
         for x in active_xs:
-            for y in self.row_ys:
+            for y in row_ys:
                 deactive_xys.append((x, y))
 
         for q_id in range(len(qubit_objs)):
-            if q_id in self.dropoff_qs:
+            if q_id in dropoff_qs:
                 if (qubit_objs[q_id].x, qubit_objs[q_id].y) not in deactive_xys:
                     raise ValueError(
-                        f'{self.name}: q {q_id} not dropped off from col {qubit_objs[q_id].c} row {qubit_objs[q_id].r} at x={qubit_objs[q_id].x} y={qubit_objs[q_id].y}.')
+                        f'{self.name}: q {q_id} not dropped off from '
+                        f'col {qubit_objs[q_id].c} row {qubit_objs[q_id].r} '
+                        f'at x={qubit_objs[q_id].x} y={qubit_objs[q_id].y}.'
+                    )
             elif qubit_objs[q_id].array == 'AOD':
                 if (qubit_objs[q_id].x, qubit_objs[q_id].y) in deactive_xys:
                     raise ValueError(
-                        f'{self.name}: q {q_id} wrongfully dropped off from col {qubit_objs[q_id].c} row {qubit_objs[q_id].r} at x={qubit_objs[q_id].x} y={qubit_objs[q_id].y}.')
-
-    def emit_full(self):
-        return self.code
-
-    def emit(self):
-        return {k: v for k, v in self.code.items() if k in ['type',
-                                                            'col_idx',
-                                                            'row_idx']}
+                        f'{self.name}: q {q_id} wrongfully dropped off from '
+                        f'col {qubit_objs[q_id].c} row {qubit_objs[q_id].r} '
+                        f'at x={qubit_objs[q_id].x} y={qubit_objs[q_id].y}.'
+                    )
 
 
-class Rydberg():
+class Rydberg(Inst):
     def __init__(self,
                  s: int,
-                 col_objs: list,
-                 row_objs: list,
-                 qubit_objs: list,
-                 gates: list):
-        self.type = 'Rydberg'
-        self.stage = s
-        self.name = self.type + '_' + str(self.stage)
-        self.duration = T_RYDBERG
+                 col_objs: Sequence[Col],
+                 row_objs: Sequence[Row],
+                 qubit_objs: Sequence[Qubit],
+                 gates: Sequence[Mapping[str, int]]):
+        super().__init__('Rydberg', prefix=f'Rydberg_{s}', stage=s)
         self.verify(gates, qubit_objs)
-        self.code = {'type': self.type,
-                     'name': self.name,
-                     'gates': gates,
-                     'duration': self.duration,
-                     'state': self.state(col_objs, row_objs, qubit_objs)}
+        super().write_code(
+            col_objs,
+            row_objs,
+            qubit_objs,
+            {'gates': gates, 'duration': T_RYDBERG, }
+        )
 
-    def state(self, col_objs, row_objs, qubit_objs):
-        curr = {}
-        curr['qubits'] = [{'id': q.id, 'x': q.x, 'y': q.y,
-                           'array': q.array, 'c': q.c, 'r': q.r} for q in qubit_objs]
-        curr['cols'] = [{'id': c.id, 'active': c.active, 'x': c.x}
-                        for c in col_objs]
-        curr['rows'] = [{'id': r.id, 'active': r.active, 'y': r.y}
-                        for r in row_objs]
-        return curr
-
-    def verify(self, gates: list, qubit_objs: list):
+    def verify(
+            self,
+            gates: Sequence[Mapping[str, int]],
+            qubit_objs: Sequence[Qubit]):
         # for g in gates:
         #     q0 = {'id': qubit_objs[g['q0']].id,
         #           'x': qubit_objs[g['q0']].x,
@@ -590,31 +847,86 @@ class Rydberg():
         #           'y': qubit_objs[g['q1']].y}
         #     if (q0['x']-q1['x'])**2 + (q0['y']-q1['y'])**2 > R_B**2:
         #         raise ValueError(
-        #             f"{self.name}: q{q0['id']} at x={q0['x']} y={q0['y']} and q{q1['id']} at x={q1['x']} y={q1['y']} are farther away than Rydberg range.")
-
+        #             f"{self.name}: q{q0['id']} at x={q0['x']} y={q0['y']} "
+        #             f"and q{q1['id']} at x={q1['x']} y={q1['y']} "
+        #             f"are farther away than Rydberg range."
+        #         )
         return
 
-    def emit(self):
-        return {'type': self.type}
 
-    def emit_full(self):
-        return self.code
+# class for big ops: ReloadRow, Reload, OffloadRow, Offload, SwapPair, Swap
+# internally, these are lists of basic operations.
+
+# todo: is there verification needed on the ComboInst lebvel?
+class ComboInst:
+    pass
 
 
-# class for big operations: ReloadRow, Reload, OffloadRow, Offload
-# internally, these are lists of basic operations
+class ComboInst():
+    """class for combined instructions which is a sequence of combined
+    instructions or DPQA instructions.
+    """
 
-# todo: add verify for big operations
+    def __init__(
+            self,
+            type: str,
+            prefix: str | None = None,
+            suffix: str | None = None,
+            stage: int = -1,
+    ):
+        """init method for combined instructions.
 
-class ReloadRow():
-    def __init__(self,
-                 s: int,
-                 r: int,
-                 prefix: str = ''):
-        self.type = 'ReloadRow'
-        self.stage = s
+        Args:
+            type (str): 
+            prefix (str | None, optional): Defaults to None.
+            suffix (str | None, optional): Defaults to None.
+            stage (int, optional): Defaults to -1.
+        """
+        self.type = type
+        self.name = (f'{prefix}:' if prefix else '') + \
+            type + (f'_{suffix}' if suffix else '')
+        self.stage = stage
+        self.duration = -1
+        self.insts = []
+
+    def emit(self) -> Sequence[Mapping[str, Any]]:
+        """combine the code of each Inst inside this ComboInst and return."""
+        code = []
+        for inst in self.insts:
+            code += inst.emit()
+        return code
+
+    def emit_full(self) -> Sequence[Mapping[str, Any]]:
+        code = []
+        for inst in self.insts:
+            code += inst.emit_full()
+        return code
+
+    def append_inst(self, inst: Inst | ComboInst):
+        self.insts.append(inst)
+
+    def prepend_inst(self, inst: Inst | ComboInst):
+        self.insts.insert(0, inst)
+
+    def is_trivial(self) -> bool:
+        for inst in self.insts:
+            if not inst.is_trivial():
+                return False
+        return True
+
+    def remove_trivial_insts(self):
+        nontrivial_insts = []
+        for inst in self.insts:
+            inst.remove_trivial_insts()
+            if not inst.is_trivial():
+                nontrivial_insts.append(inst)
+        self.insts = nontrivial_insts
+
+
+class ReloadRow(ComboInst):
+    def __init__(self, s: int, r: int, prefix: str = ''):
+        super().__init__('ReloadRow', prefix=prefix, suffix=str(r), stage=s)
         self.row_id = r
-        self.name = prefix + ':' + self.type + '_' + str(self.row_id)
         self.moving_cols_id = []
         self.moving_cols_begin = []
         self.moving_cols_end = []
@@ -624,84 +936,87 @@ class ReloadRow():
         self.moving_cols_begin.append(begin)
         self.moving_cols_end.append(end)
 
-    def generate_col_shift(self, col_objs: list, row_objs: list, qubit_objs: list):
-        self.col_shift = Move(s=self.stage,
-                              col_objs=col_objs,
-                              row_objs=row_objs,
-                              qubit_objs=qubit_objs,
-                              col_idx=self.moving_cols_id,
-                              col_begin=self.moving_cols_begin,
-                              col_end=self.moving_cols_end,
-                              row_idx=[],
-                              row_begin=[],
-                              row_end=[],
-                              prefix=self.name + ':ColShift')
+    def generate_col_shift(
+            self,
+            col_objs: Sequence[Col],
+            row_objs: Sequence[Row],
+            qubit_objs: Sequence[Qubit],
+    ):
+        self.insts.append(
+            Move(s=self.stage,
+                 col_objs=col_objs,
+                 row_objs=row_objs,
+                 qubit_objs=qubit_objs,
+                 col_idx=self.moving_cols_id,
+                 col_begin=self.moving_cols_begin,
+                 col_end=self.moving_cols_end,
+                 row_idx=[],
+                 row_begin=[],
+                 row_end=[],
+                 prefix=self.name + ':ColShift')
+        )
 
-    def generate_row_activate(self, col_objs: list, row_objs: list, qubit_objs: list, cols: list, xs: list, y: int, pickup_qs: list):
-        self.row_activate = Activate(s=self.stage,
-                                     col_objs=col_objs,
-                                     row_objs=row_objs,
-                                     qubit_objs=qubit_objs,
-                                     col_idx=cols,
-                                     col_xs=xs,
-                                     row_idx=[self.row_id, ],
-                                     row_ys=[y, ],
-                                     pickup_qs=pickup_qs,
-                                     prefix=self.name)
+    def generate_row_activate(
+            self,
+            col_objs: Sequence[Col],
+            row_objs: Sequence[Row],
+            qubit_objs: Sequence[Qubit],
+            cols: Sequence[int],
+            xs: Sequence[int],
+            y: int,
+            pickup_qs: Sequence[int],
+    ):
+        self.insts.append(
+            Activate(s=self.stage,
+                     col_objs=col_objs,
+                     row_objs=row_objs,
+                     qubit_objs=qubit_objs,
+                     col_idx=cols,
+                     col_xs=xs,
+                     row_idx=[self.row_id, ],
+                     row_ys=[y, ],
+                     pickup_qs=pickup_qs,
+                     prefix=self.name)
+        )
 
-    def generate_parking(self, col_objs, row_objs, qubit_objs: list, shift_down: int, col_idx: list = [], col_begin: list = [], col_end: list = []):
-        self.row_shift = Move(s=self.stage,
-                              col_objs=col_objs,
-                              row_objs=row_objs,
-                              qubit_objs=qubit_objs,
-                              col_idx=col_idx,
-                              col_begin=col_begin,
-                              col_end=col_end,
-                              row_idx=[self.row_id, ],
-                              row_begin=[row_objs[self.row_id].y],
-                              row_end=[row_objs[self.row_id].y - shift_down],
-                              prefix=self.name + ':Parking')
+    def generate_parking(
+            self,
+            col_objs: Sequence[Col],
+            row_objs: Sequence[Row],
+            qubit_objs: Sequence[Qubit],
+            shift_down: int,
+            col_idx: Sequence[int] = [],
+            col_begin: Sequence[int] = [],
+            col_end: Sequence[int] = []
+    ):
+        self.insts.append(
+            Move(s=self.stage,
+                 col_objs=col_objs,
+                 row_objs=row_objs,
+                 qubit_objs=qubit_objs,
+                 col_idx=col_idx,
+                 col_begin=col_begin,
+                 col_end=col_end,
+                 row_idx=[self.row_id, ],
+                 row_begin=[row_objs[self.row_id].y],
+                 row_end=[row_objs[self.row_id].y - shift_down],
+                 prefix=self.name + ':Parking')
+        )
 
-    def emit(self):
-        return [self.col_shift.emit(), self.row_activate.emit(), self.row_shift.emit()]
 
-    def emit_full(self):
-        return [self.col_shift.emit_full(), self.row_activate.emit_full(), self.row_shift.emit_full()]
-
-
-class Reload():
+class Reload(ComboInst):
     def __init__(self, s: int):
-        self.type = 'Reload'
-        self.stage = s
-        self.name = self.type + f'_{s}'
-        self.row_reloads = []
+        super().__init__('Reload', suffix=str(s), stage=s)
 
     def add_row_reload(self, r: int):
-        self.row_reloads.append(ReloadRow(self.stage, r, prefix=self.name))
-        return self.row_reloads[-1]
-
-    def emit_full(self):
-        code_full = []
-        for reloadRow in self.row_reloads:
-            code_full += reloadRow.emit_full()
-        return code_full
-
-    def emit(self):
-        code = []
-        for reloadRow in self.row_reloads:
-            code += reloadRow.emit()
-        return code
+        self.insts.append(ReloadRow(self.stage, r, prefix=self.name))
+        return self.insts[-1]
 
 
-class OffloadRow():
-    def __init__(self,
-                 s: int,
-                 r: int,
-                 prefix: str = ''):
-        self.type = 'OffloadRow'
-        self.stage = s
+class OffloadRow(ComboInst):
+    def __init__(self, s: int, r: int, prefix: str = ''):
+        super().__init__('OffloadRow', prefix=prefix, suffix=str(r), stage=s)
         self.row_id = r
-        self.name = prefix + ':' + self.type + '_' + str(self.row_id)
         self.moving_cols_id = []
         self.moving_cols_begin = []
         self.moving_cols_end = []
@@ -711,103 +1026,164 @@ class OffloadRow():
         self.moving_cols_begin.append(begin)
         self.moving_cols_end.append(end)
 
-    def generate_col_shift(self, col_objs: list, row_objs: list, qubit_objs: list):
-        self.col_shift = Move(s=self.stage,
-                              col_objs=col_objs,
-                              row_objs=row_objs,
-                              qubit_objs=qubit_objs,
-                              col_idx=self.moving_cols_id,
-                              col_begin=self.moving_cols_begin,
-                              col_end=self.moving_cols_end,
-                              row_idx=[],
-                              row_begin=[],
-                              row_end=[],
-                              prefix=self.name + ':ColShift')
+    def generate_col_shift(
+            self,
+            col_objs: Sequence[Col],
+            row_objs: Sequence[Row],
+            qubit_objs: Sequence[Qubit],
+    ):
+        self.insts.append(
+            Move(s=self.stage,
+                 col_objs=col_objs,
+                 row_objs=row_objs,
+                 qubit_objs=qubit_objs,
+                 col_idx=self.moving_cols_id,
+                 col_begin=self.moving_cols_begin,
+                 col_end=self.moving_cols_end,
+                 row_idx=[],
+                 row_begin=[],
+                 row_end=[],
+                 prefix=self.name + ':ColShift')
+        )
 
-    def generate_row_shift(self, col_objs, row_objs, qubit_objs: list, site_y: int):
-        self.row_shift = Move(s=self.stage,
-                              col_objs=col_objs,
-                              row_objs=row_objs,
-                              qubit_objs=qubit_objs,
-                              col_idx=[],
-                              col_begin=[],
-                              col_end=[],
-                              row_idx=[self.row_id, ],
-                              row_begin=[row_objs[self.row_id].y],
-                              row_end=[site_y*Y_SITE_SEP, ],
-                              prefix=self.name + ':RowDownShift')
+    def generate_row_shift(
+            self,
+            col_objs: Sequence[Col],
+            row_objs: Sequence[Row],
+            qubit_objs: Sequence[Qubit],
+            site_y: int,
+    ):
+        self.insts.append(
+            Move(s=self.stage,
+                 col_objs=col_objs,
+                 row_objs=row_objs,
+                 qubit_objs=qubit_objs,
+                 col_idx=[],
+                 col_begin=[],
+                 col_end=[],
+                 row_idx=[self.row_id, ],
+                 row_begin=[row_objs[self.row_id].y],
+                 row_end=[site_y*Y_SITE_SEP, ],
+                 prefix=self.name + ':RowDownShift')
+        )
 
-    def generate_row_deactivate(self, col_objs: list, row_objs: list, qubit_objs: list, dropoff_qs: list):
-        self.row_deactivate = Deactivate(s=self.stage,
-                                         col_objs=col_objs,
-                                         row_objs=row_objs,
-                                         qubit_objs=qubit_objs,
-                                         col_idx=[],
-                                         col_xs=[],
-                                         row_idx=[self.row_id, ],
-                                         row_ys=[row_objs[self.row_id].y, ],
-                                         dropoff_qs=dropoff_qs,
-                                         prefix=self.name)
+    def generate_row_deactivate(
+            self,
+            col_objs: Sequence[Col],
+            row_objs: Sequence[Row],
+            qubit_objs: Sequence[Qubit],
+            dropoff_qs: Sequence[int],
+    ):
+        self.insts.append(
+            Deactivate(s=self.stage,
+                       col_objs=col_objs,
+                       row_objs=row_objs,
+                       qubit_objs=qubit_objs,
+                       col_idx=[],
+                       col_xs=[],
+                       row_idx=[self.row_id, ],
+                       row_ys=[row_objs[self.row_id].y, ],
+                       dropoff_qs=dropoff_qs,
+                       prefix=self.name)
+        )
 
-    def emit(self):
-        return [self.col_shift.emit(), self.row_shift.emit(), self.row_deactivate.emit()]
 
-    def emit_full(self):
-        return [self.col_shift.emit_full(), self.row_shift.emit_full(), self.row_deactivate.emit_full()]
-
-
-class Offload():
+class Offload(ComboInst):
     def __init__(self, s: int):
-        self.type = 'Offload'
-        self.stage = s
-        self.name = self.type + f'_{s}'
-        self.row_offloads = []
+        super().__init__('Offload', suffix=str(s), stage=s)
 
     def add_row_offload(self, r: int):
-        self.row_offloads.append(OffloadRow(self.stage, r, prefix=self.name))
-        return self.row_offloads[-1]
+        self.insts.append(OffloadRow(self.stage, r, prefix=self.name))
+        return self.insts[-1]
 
-    def emit_full(self):
-        code_full = []
-        for offloadRow in self.row_offloads:
-            code_full += offloadRow.emit_full()
-        code_full.append(self.col_deactivate.emit_full())
-        return code_full
-
-    def emit(self):
-        code = []
-        for offloadRow in self.row_offloads:
-            code += offloadRow.emit()
-        code.append(self.col_deactivate.emit())
-        return code
-
-    def all_cols_deactivate(self, col_objs, row_objs, qubit_objs):
-        self.col_deactivate = Deactivate(s=self.stage,
-                                         col_objs=col_objs,
-                                         row_objs=row_objs,
-                                         qubit_objs=qubit_objs,
-                                         col_idx=[
-                                             c.id for c in col_objs if c.active],
-                                         col_xs=[
-                                             c.x for c in col_objs if c.active],
-                                         row_idx=[],
-                                         row_ys=[],
-                                         dropoff_qs=[],
-                                         prefix=self.name)
+    def all_cols_deactivate(
+            self,
+            col_objs: Sequence[Col],
+            row_objs: Sequence[Row],
+            qubit_objs: Sequence[Qubit],
+    ):
+        self.insts.append(
+            Deactivate(
+                s=self.stage,
+                col_objs=col_objs,
+                row_objs=row_objs,
+                qubit_objs=qubit_objs,
+                col_idx=[c.id for c in col_objs if c.active],
+                col_xs=[c.x for c in col_objs if c.active],
+                row_idx=[],
+                row_ys=[],
+                dropoff_qs=[],
+                prefix=self.name
+            )
+        )
 
 
-class SwapPair():
+class SwapPair(ComboInst):
+    """swap a pair of atoms A and B at the same interaction site
+       O stands for an empty trap
+
+            A  B
+
+        step1: activate row 0 and col 0 on A to pick it up
+            |
+         ---A--B---
+            |
+
+        step2: move A to below B
+               |
+            O  B
+               |
+           ----A-----
+               |
+
+        step3: activate row 1 to pick up B
+               |
+         ---O--B---
+               |
+         ------A---
+               |
+
+        step4: move A and B to the place A used to be
+            |
+        ----B--O--
+            |
+        ----A-----
+            |
+
+        step5: deactivate row 1 to drop off B
+            |
+            B  O
+            |
+        ----A-----
+            |
+
+        step6: move A to the place B used to be
+               |
+         ---B--A---
+               |
+
+        step7: deactivate row 0 and col 0 to drop off A
+
+            B  A
+    """
+
     def __init__(self,
                  s: int,
-                 col_objs: list,
-                 row_objs: list,
-                 qubit_objs: list,
+                 col_objs: Sequence[Col],
+                 row_objs: Sequence[Row],
+                 qubit_objs: Sequence[Qubit],
                  left_q_id: int,
                  right_q_id: int,
-                 prefix: str = ''):
-        self.type = 'SwapPair'
-        self.stage = s
-        self.name = prefix + ':' + self.type + f'({left_q_id},{right_q_id})'
+                 prefix: str = ''
+                 ):
+        super().__init__(
+            'SwapPair',
+            prefix=prefix,
+            suffix=f'({left_q_id},{right_q_id})',
+            stage=s
+        )
+
+        # precondition
         left_x = qubit_objs[left_q_id].x
         right_x = qubit_objs[right_q_id].x
         y = qubit_objs[left_q_id].y
@@ -815,7 +1191,8 @@ class SwapPair():
         qubit_objs[left_q_id].r = 0
         qubit_objs[right_q_id].c = 0
         qubit_objs[right_q_id].r = 1
-        self.objs = [
+
+        self.insts = [
             Activate(s,
                      col_objs=col_objs,
                      row_objs=row_objs,
@@ -891,103 +1268,100 @@ class SwapPair():
                        prefix=self.name + f':DropOff_q{left_q_id}'),
         ]
 
-    def emit(self):
-        return [obj.emit() for obj in self.objs]
 
-    def emit_full(self):
-        return [obj.emit_full() for obj in self.objs]
-
-
-class Swap():
+class Swap(ComboInst):
     def __init__(self, s: int):
-        self.type = 'Swap'
-        self.stage = s
-        self.name = self.type + f'_{s}'
-        self.code = []
-        self.code_full = []
+        super().__init__('Swap', suffix=str(s), stage=s)
 
-    def add_swap_pair(self, col_objs, row_objs, qubit_objs, q_id, qq_id):
+    def add_swap_pair(
+            self,
+            col_objs: Sequence[Col],
+            row_objs: Sequence[Row],
+            qubit_objs: Sequence[Qubit],
+            q_id: int,
+            qq_id: int
+    ):
         left_q_id = q_id
         right_q_id = qq_id
         if qubit_objs[q_id].x > qubit_objs[qq_id].x:
             left_q_id = qq_id
             right_q_id = q_id
-        obj = SwapPair(self.stage, col_objs, row_objs,
-                       qubit_objs, left_q_id, right_q_id, self.name)
-        self.code += obj.emit()
-        self.code_full += obj.emit_full()
-
-    def emit(self):
-        return self.code
-
-    def emit_full(self):
-        return self.code_full
+        self.insts.append(
+            SwapPair(self.stage, col_objs, row_objs,
+                     qubit_objs, left_q_id, right_q_id, self.name)
+        )
 
 
 class CodeGen():
-    def __init__(self, file_name: str, no_transfer: bool = False, dir: str = None):
-        self.no_transfer = no_transfer
-        self.compiled_file = file_name
+    """Generate code files: json containing a list of dict, each one 
+    corresponding to a DPQA instruction defined above. 
+    """
+
+    def __init__(
+            self,
+            file_name: str,
+            no_transfer: bool = False,
+            dir: str = None
+    ):
+        self.read_compiled(file_name)
+        program = self.builder(no_transfer)
+
         if not dir:
             dir = './results/code/'
-        self.code_file = dir + \
-            (file_name.split('/')[-1]).replace('.json', '_code.json')
         self.code_full_file = dir + \
             (file_name.split('/')[-1]).replace('.json', '_code_full.json')
-        self.read_compiled()
-        self.code_full = []
-        self.code = []
-        self.qubits = [Qubit(i) for i in range(self.n_q)]
-        self.rows = [Row(i) for i in range(self.r_high)]
-        self.cols = [Col(i) for i in range(self.c_high)]
-
-        self.builder()
-        self.remove_empty_moves()
-        self.code.insert(0, self.init.emit())
-        self.code_full.insert(0, self.init.emit_full())
-        with open(self.code_file, 'w') as f:
-            json.dump(self.code, f)
         with open(self.code_full_file, 'w') as f:
-            json.dump(self.code_full, f)
+            json.dump(program.emit_full(), f)
+        with open(self.code_full_file.replace('_code_full', '_code'), 'w') as f:
+            json.dump(program.emit(), f)
 
-    def read_compiled(self):
-        with open(self.compiled_file, 'r') as f:
+    def read_compiled(self, compiled_file: str):
+        with open(compiled_file, 'r') as f:
             data = json.load(f)
         self.n_q = data['n_q']
-        self.x_high = data['coord_r']
-        self.y_high = data['coord_u']
-        self.c_high = data['aod_r']
-        self.r_high = data['aod_u']
+        self.x_high = data['n_x']
+        self.y_high = data['n_y']
+        self.c_high = data['n_c']
+        self.r_high = data['n_r']
         self.layers = data['layers']
         self.n_t = len(self.layers)
+
+        """change of convention. In solve() and the SMT model, a/c/r_s govern
+        the movement from stage s to stage s+1, i.e.,
+            ----------- x/y_0 
+            | a/c/r_0 |
+            ----------- x/y_1
+            | a/c/r_1 |
+            ----------- x/y_2
+            | a/c/r_2 |
+
+        However, the initial stage is very special in codegen and animation,
+        so we generate code in this way:
+           Rydberg_0  (special)  <------- x/y_0
+           
+           Swap_1 (optional)  <---. 
+           Reload_1  <----------\  \ 
+           BigMove_1  <--------- a/c/r_1
+           Offload_1  <---------/ 
+           Rydberg_1  <----------- x/y_1
+
+               ...
+
+        Thus, the movement between stage s and s+1 should be govened by a/c/r
+        with subscript s+1, e.g., BigMove_1 uses a/c/r_1 above.
+        So we need to shift the a/c/r variable values here.
+        """
         for i in range(self.n_t-1, 0, -1):
             for q in range(self.n_q):
-                self.layers[i]['qubits'][q]['a'] = self.layers[i -
-                                                               1]['qubits'][q]['a']
-                self.layers[i]['qubits'][q]['c'] = self.layers[i -
-                                                               1]['qubits'][q]['c']
-                self.layers[i]['qubits'][q]['r'] = self.layers[i -
-                                                               1]['qubits'][q]['r']
+                self.layers[i]['qubits'][q]['a'] =\
+                    self.layers[i - 1]['qubits'][q]['a']
+                self.layers[i]['qubits'][q]['c'] =\
+                    self.layers[i - 1]['qubits'][q]['c']
+                self.layers[i]['qubits'][q]['r'] =\
+                    self.layers[i - 1]['qubits'][q]['r']
 
-    def remove_empty_moves(self):
-        vacuous_insts = [i for i in range(
-            len(self.code)) if self.code_full[i]['duration'] == 0]
-        self.code = [inst for i, inst in enumerate(
-            self.code) if i not in vacuous_insts]
-        self.code_full = [inst for i, inst in enumerate(
-            self.code_full) if i not in vacuous_insts]
-
-    def builder(self):
+        # infer some info of the AODs
         self.aod_from_compiled()
-        self.builder_init()
-        for s in range(1, len(self.layers)):
-            self.builder_swap(s)
-            if (not self.no_transfer) or s == 1:
-                self.builder_reload(s)
-            self.builder_move(s)
-            if not self.no_transfer:
-                self.builder_offload(s)
-            self.builder_rydberg(s)
 
     def aod_from_compiled(self):
         for s, layer in enumerate(self.layers):
@@ -998,71 +1372,153 @@ class CodeGen():
             layer['col'] = [{'id': i, 'qs': []}
                             for i in range(self.c_high-0)]
             prev_layer = self.layers[s-1]
+
+            # figure out in the movement from stage s-1 to s:
+            # - before the movement, where is each row 'y_begin'
+            # - after the movement, where is each row 'y_end'
+            # - what qubits are in this row 'qs'
+            # similar for each AOD column
             for i, q in enumerate(layer['qubits']):
                 if layer['qubits'][i]['a']:
-                    layer['row'][q['r']]['y_begin'] = prev_layer['qubits'][i]['y']
+                    layer['row'][q['r']]['y_begin'] =\
+                        prev_layer['qubits'][i]['y']
                     layer['row'][q['r']]['y_end'] = q['y']
                     layer['row'][q['r']]['qs'].append(q['id'])
-                    layer['col'][q['c']]['x_begin'] = prev_layer['qubits'][i]['x']
+                    layer['col'][q['c']]['x_begin'] =\
+                        prev_layer['qubits'][i]['x']
                     layer['col'][q['c']]['x_end'] = q['x']
                     layer['col'][q['c']]['qs'].append(q['id'])
 
+            # figure out in the movement from stage s-1 to s:
+            # - before the movement, which columns have site coord = X
+            # - for all these cols, what is the relevant order from left 'offset'
+            # - after the movement, which columns have site coord = X
+            # - for all these cols, what is the relevant order from left 'offset'
+            # similar for the AOD rows
             for case in ['_begin', '_end']:
                 x_cols = []
                 for x in range(self.x_high):
                     cols_at_x = []
                     for c in range(self.c_high):
-                        if layer['col'][c]['qs'] and layer['col'][c]['x'+case] == x:
+                        if (layer['col'][c]['qs']
+                                and layer['col'][c]['x' + case] == x):
                             cols_at_x.append(c)
                     for i, c in enumerate(cols_at_x):
-                        layer['col'][c]['offset'+case] = i
+                        layer['col'][c]['offset' + case] = i
                     x_cols.append(cols_at_x)
-                layer['x_cols'+case] = x_cols
+                layer['x_cols' + case] = x_cols
                 y_rows = []
                 for y in range(self.y_high):
                     rows_at_y = []
                     for r in range(self.r_high):
-                        if layer['row'][r]['qs'] and layer['row'][r]['y'+case] == y:
+                        if (layer['row'][r]['qs']
+                                and layer['row'][r]['y' + case] == y):
                             rows_at_y.append(r)
                     for i, r in enumerate(rows_at_y):
-                        layer['row'][r]['offset'+case] = i
+                        layer['row'][r]['offset' + case] = i
                     y_rows.append(rows_at_y)
-                layer['y_rows'+case] = y_rows
+                layer['y_rows' + case] = y_rows
 
-    def builder_init(self):
-        slm_qubit_idx = list(range(self.n_q))  # all qubits in SLM
-        slm_qubit_xys = [(X_SITE_SEP*self.layers[0]['qubits'][i]['x'],
-                          Y_SITE_SEP*self.layers[0]['qubits'][i]['y']) for i in range(self.n_q)]
+    def builder(self, no_transfer: bool):
+        qubits = [Qubit(i) for i in range(self.n_q)]
+        rows = [Row(i) for i in range(self.r_high)]
+        cols = [Col(i) for i in range(self.c_high)]
+        program = ComboInst('Program')
+
+        # read to comment in read_compiled() for structure of this method.
+        init = self.builder_init(cols, rows, qubits, program)  # has Rydberg_0
+
+        for s in range(1, len(self.layers)):
+            self.builder_swap(s, cols, rows, qubits, program)
+
+            if (not no_transfer) or s == 1:
+                # if we know there is not atom transfer, we can simply skip the
+                # reload and offload procedures. However, we keep the first one
+                # just for convenience of generating animations.
+                self.builder_reload(s, cols, rows, qubits, program)
+
+            self.builder_move(s, cols, rows, qubits, program)
+
+            if not no_transfer:
+                self.builder_offload(s, cols, rows, qubits, program)
+
+            self.builder_rydberg(s, cols, rows, qubits, program, init)
+
+        program.remove_trivial_insts()
+        program.prepend_inst(init)
+        return program
+
+    def builder_init(
+            self,
+            cols: Sequence[Col],
+            rows: Sequence[Row],
+            qubits: Sequence[Qubit],
+            program: ComboInst,
+    ) -> Inst:
+        slm_qubit_idx = list(range(self.n_q))  # put all qubits in SLM
+        slm_qubit_xys = [(
+            X_SITE_SEP * self.layers[0]['qubits'][i]['x'],
+            Y_SITE_SEP * self.layers[0]['qubits'][i]['y']
+        ) for i in range(self.n_q)]  # put all qubits in the left trap
+
+        # when there are more than one qubit in a site at the beginning,
+        # need to put one of them in the right trap.
         for g in self.layers[0]['gates']:
             a0 = self.layers[1]['qubits'][g['q0']]['a']
             a1 = self.layers[1]['qubits'][g['q1']]['a']
-            x_left = X_SITE_SEP*self.layers[0]['qubits'][g['q0']]['x']
+            x_left = X_SITE_SEP * self.layers[0]['qubits'][g['q0']]['x']
             x_right = x_left + SITE_WIDTH
-            y = Y_SITE_SEP*self.layers[0]['qubits'][g['q0']]['y']
+            y = Y_SITE_SEP * self.layers[0]['qubits'][g['q0']]['y']
 
-            if a0 == 1 and a1 == 1 and self.layers[1]['qubits'][g['q0']]['c'] > self.layers[1]['qubits'][g['q1']]['c']:
+            # if both atoms are in AOD, use their column indices to decide
+            # which one to put in the left trap and which one to the right
+            # if they have the same col index, the order does not matter
+            # in Reload, we will pick them up in different rows.
+            if (a0 == 1
+                and a1 == 1
+                and self.layers[1]['qubits'][g['q0']]['c'] >
+                    self.layers[1]['qubits'][g['q1']]['c']):
                 slm_qubit_xys[g['q0']] = (x_right, y)
             else:
                 slm_qubit_xys[g['q1']] = (x_right, y)
 
-        self.init = Init(0, self.cols, self.rows, self.qubits,
-                         slm_qubit_idx=slm_qubit_idx,
-                         slm_qubit_xys=slm_qubit_xys)
-        self.init.code['n_q'] = self.n_q
-        self.init.code['x_high'] = self.x_high
-        self.init.code['y_high'] = self.y_high
-        self.init.code['c_high'] = self.c_high
-        self.init.code['r_high'] = self.r_high
-        self.builder_rydberg(0)
+        init = Init(cols, rows, qubits,
+                    slm_qubit_idx=slm_qubit_idx,
+                    slm_qubit_xys=slm_qubit_xys,
+                    data={
+                        'n_q': self.n_q,
+                        'x_high': self.x_high,
+                        'y_high': self.y_high,
+                        'c_high': self.c_high,
+                        'r_high': self.r_high,
+                    })
 
-    def builder_rydberg(self, s: int):
-        obj = Rydberg(
-            s, self.cols, self.rows, self.qubits, self.layers[s]['gates'])
-        self.code.append(obj.emit())
-        self.code_full.append(obj.emit_full())
-        self.init.add_slms([(q.x, q.y) for q in self.qubits])
+        self.builder_rydberg(0, cols, rows, qubits, program, init)
 
-    def builder_swap(self, s: int):
+        return init
+
+    def builder_rydberg(
+            self,
+            s: int,
+            cols: Sequence[Col],
+            rows: Sequence[Row],
+            qubits: Sequence[Qubit],
+            program: ComboInst,
+            init: Inst
+    ):
+        program.append_inst(
+            Rydberg(s, cols, rows, qubits, self.layers[s]['gates'])
+        )
+        init.add_slms([(q.x, q.y) for q in qubits])
+
+    def builder_swap(
+            self,
+            s: int,
+            cols: Sequence[Col],
+            rows: Sequence[Row],
+            qubits: Sequence[Qubit],
+            program: ComboInst,
+    ):
         swap_obj = Swap(s)
         prev_layer = self.layers[s-1]
         this_layer = self.layers[s]
@@ -1070,7 +1526,6 @@ class CodeGen():
             for q1_id in range(q0_id+1, self.n_q):
                 q0_a = this_layer['qubits'][q0_id]['a']
                 q1_a = this_layer['qubits'][q1_id]['a']
-                # if two qubits are at the same site and both being picked up
                 if q0_a == 1 and q1_a == 1:
                     q0_x = prev_layer['qubits'][q0_id]['x']
                     q1_x = prev_layer['qubits'][q1_id]['x']
@@ -1080,15 +1535,92 @@ class CodeGen():
                     q1_c = this_layer['qubits'][q1_id]['c']
                     q0_r = this_layer['qubits'][q0_id]['r']
                     q1_r = this_layer['qubits'][q1_id]['r']
+                    # if two qubits are at the same site and
+                    # both being picked up in the same row
                     if (q0_x, q0_y, q0_r) == (q1_x, q1_y, q1_r):
-                        # if their position and column indeces are in reverse order
-                        if (q0_c > q1_c and self.qubits[q0_id].x < self.qubits[q1_id].x) or (q0_c < q1_c and self.qubits[q0_id].x > self.qubits[q1_id].x):
-                            swap_obj.add_swap_pair(
-                                self.cols, self.rows, self.qubits, q0_id, q1_id)
-        self.code += swap_obj.emit()
-        self.code_full += swap_obj.emit_full()
+                        # if their position and col indeces are in reverse order
+                        if (
+                            (q0_c > q1_c
+                             and qubits[q0_id].x < qubits[q1_id].x
+                             )
+                            or (q0_c < q1_c
+                                and qubits[q0_id].x > qubits[q1_id].x
+                                )
+                        ):
+                            swap_obj.add_swap_pair(cols, rows, qubits,
+                                                   q0_id, q1_id)
+        program.append_inst(swap_obj)
 
-    def builder_reload(self, s: int):
+    def builder_move(
+            self,
+            s: int,
+            cols: Sequence[Col],
+            rows: Sequence[Row],
+            qubits: Sequence[Qubit],
+            program: ComboInst,
+    ):
+        """to avoid collision, the big moves will end in a slightly adjusted
+        location: 1 um to +X direction and AOD_SEP(2) um to +Y direction
+        Suppose the O's are the two traps in an interaction site
+                O--------O
+        The atoms will finish the big move in
+                O--------O
+             -----A-----
+                  -----B-----
+        (+X is ->, +Y is down, 1um is --, and AOD_SEP is one line height)
+        There can be other cases, e.g., A and B are in the same column
+                O--------O
+             -----A-----
+             -----B-----
+        Or, A and B are in the same row
+                O--------O
+             -----A---B------
+        """
+
+        col_idx = []
+        col_begin = []
+        col_end = []
+        for col_id in range(self.c_high):
+            if cols[col_id].active:
+                col_idx.append(col_id)
+                col_begin.append(cols[col_id].x)
+                site_x = self.layers[s]['col'][col_id]['x_end']
+                offset = self.layers[s]['col'][col_id]['offset_end']
+                col_end.append(1 + site_x * X_SITE_SEP + AOD_SEP * offset)
+
+        row_idx = []
+        row_begin = []
+        row_end = []
+        for row_id in range(self.r_high):
+            if rows[row_id].active:
+                row_idx.append(row_id)
+                row_begin.append(rows[row_id].y)
+                site_y = self.layers[s]['row'][row_id]['y_end']
+                offset = self.layers[s]['row'][row_id]['offset_end']
+                row_end.append(site_y * Y_SITE_SEP + AOD_SEP * (1 + offset))
+
+        program.append_inst(
+            Move(s=s,
+                 col_objs=cols,
+                 row_objs=rows,
+                 qubit_objs=qubits,
+                 col_idx=col_idx,
+                 col_begin=col_begin,
+                 col_end=col_end,
+                 row_idx=row_idx,
+                 row_begin=row_begin,
+                 row_end=row_end,
+                 prefix=f'BigMove_{s}')
+        )
+
+    def builder_reload(
+            self,
+            s: int,
+            cols: Sequence[Col],
+            rows: Sequence[Row],
+            qubits: Sequence[Qubit],
+            program: ComboInst,
+    ):
         layer = self.layers[s]
         prev_layer = self.layers[s-1]
         reload_obj = Reload(s)
@@ -1099,169 +1631,205 @@ class CodeGen():
                 pickup_qs = []
                 cols_to_active = []
                 x_to_activate = []
-                # consider the movements site by site
+                # consider the movements in a row of sites
                 for site_x in range(self.x_high):
                     site_qs = []
-                    for q_id in range(len(self.qubits)):
-                        if layer['qubits'][q_id]['a'] == 1 and prev_layer['qubits'][q_id]['x'] == site_x and layer['qubits'][q_id]['r'] == row_id:
+                    for q_id in range(len(qubits)):
+                        # find out the qubits with site_x and in row_id
+                        if (layer['qubits'][q_id]['a'] == 1
+                            and prev_layer['qubits'][q_id]['x'] == site_x
+                                and layer['qubits'][q_id]['r'] == row_id):
                             site_qs.append(q_id)
-                            self.qubits[q_id].r = row_id
-                            self.qubits[q_id].c = layer['qubits'][q_id]['c']
-                    if len(site_qs) == 1:
-                        q_id = site_qs[0]
-                        col_id_left = layer['qubits'][q_id]['c']
-                        col_id_right = col_id_left
-                        lower_offset = layer['col'][col_id_left]['offset_begin']
-                        upper_offset = lower_offset
-                        lower_x = self.qubits[q_id].x
-                        upper_x = lower_x
-                        if not self.cols[col_id_left].active:
-                            cols_to_active.append(col_id_left)
-                            x_to_activate.append(lower_x)
-                        else:  # col already active, shift it to align with q_id
-                            reloadRow_obj.add_col_shift(
-                                id=col_id_left, begin=self.cols[col_id_left].x, end=lower_x)
-                    elif len(site_qs) == 2:
+                            qubits[q_id].r = row_id
+                            qubits[q_id].c = layer['qubits'][q_id]['c']
+
+                    # shift the 1 or 2 cols that are picking up qubits
+                    if len(site_qs) == 2:
+                        # which qubit is on the left and which on the right
                         [q_id_left, q_id_right] = site_qs
-                        if layer['qubits'][q_id_left]['c'] > layer['qubits'][q_id_right]['c']:
+                        if layer['qubits'][q_id_left]['c'] >\
+                                layer['qubits'][q_id_right]['c']:
                             tmp = q_id_left
                             q_id_left = q_id_right
                             q_id_right = tmp
+
+                        # current location of Cols
                         col_id_left = layer['qubits'][q_id_left]['c']
                         col_id_right = layer['qubits'][q_id_right]['c']
-                        lower_offset = layer['col'][col_id_left]['offset_begin']
-                        upper_offset = layer['col'][col_id_right]['offset_begin']
-                        lower_x = self.qubits[q_id_left].x
-                        upper_x = self.qubits[q_id_right].x
-                        if not self.cols[col_id_left].active:
+                        lower_offset =\
+                            layer['col'][col_id_left]['offset_begin']
+                        upper_offset =\
+                            layer['col'][col_id_right]['offset_begin']
+
+                        # target locations of Cols
+                        lower_x = qubits[q_id_left].x
+                        upper_x = qubits[q_id_right].x
+
+                        # process the Col on the left
+                        if not cols[col_id_left].active:
                             cols_to_active.append(col_id_left)
                             x_to_activate.append(lower_x)
                         else:
                             reloadRow_obj.add_col_shift(
-                                id=col_id_left, begin=self.cols[col_id_left].x, end=lower_x)
-                        if not self.cols[col_id_right].active:
+                                id=col_id_left,
+                                begin=cols[col_id_left].x,
+                                end=lower_x)
+
+                        # process the Col on the right
+                        if not cols[col_id_right].active:
                             cols_to_active.append(col_id_right)
                             x_to_activate.append(upper_x)
                         else:
                             reloadRow_obj.add_col_shift(
-                                id=col_id_right, begin=self.cols[col_id_right].x, end=upper_x)
+                                id=col_id_right,
+                                begin=cols[col_id_right].x,
+                                end=upper_x)
+
+                    elif len(site_qs) == 1:
+                        # for convience later on, we still keep the *_left and
+                        # *_right vars even if there is one qubit to pick up
+                        q_id = site_qs[0]
+                        col_id_left = layer['qubits'][q_id]['c']
+                        col_id_right = col_id_left
+                        lower_offset =\
+                            layer['col'][col_id_left]['offset_begin']
+                        upper_offset = lower_offset
+                        lower_x = qubits[q_id].x
+                        upper_x = lower_x
+                        if not cols[col_id_left].active:
+                            cols_to_active.append(col_id_left)
+                            x_to_activate.append(lower_x)
+                        else:  # col already active, shift it to align with q_id
+                            reloadRow_obj.add_col_shift(
+                                id=col_id_left,
+                                begin=cols[col_id_left].x,
+                                end=lower_x)
+
                     elif len(site_qs) > 2:
                         raise ValueError(
-                            f"builder reload {s} row {row_id} site {site_x}: more than 2 qubits")
+                            f"builder reload {s} row {row_id} site {site_x}:"
+                            f" more than 2 qubits"
+                        )
                     else:
                         continue
 
-                    # which site each col is in corresponds to 'x_cols_begin'
-                    # '_begin' is wrt the movement between stage s-1 and s
+                    # shift other Cols that are already activated. Those Cols
+                    # may not be picking up any qubit in this row, but due to
+                    # AOD order constraints, we need to shift them to have the
+                    # correct order when we shift the Cols that indeed are
+                    # picking up some qubit in this row.
                     for col_id in layer['x_cols_begin'][site_x]:
-                        if self.cols[col_id].active and col_id != col_id_left and col_id != col_id_right:
+                        # the Cols at site_x in the beginning between stage s-1
+                        # and s (since we are processing Reload_s now)
+
+                        if (cols[col_id].active
+                            and col_id != col_id_left
+                                and col_id != col_id_right):
+                            # if this Col is not the one involved in loading
+
                             # if there is a col on the right of the cols for loading
-                            if layer['col'][col_id]['offset_begin'] > upper_offset:
+                            if layer['col'][col_id]['offset_begin'] >\
+                                    upper_offset:
                                 reloadRow_obj.add_col_shift(
-                                    id=col_id, begin=self.cols[col_id].x, end=upper_x+AOD_SEP*(layer['col'][col_id]['offset_begin']-upper_offset)+1)
+                                    id=col_id,
+                                    begin=cols[col_id].x,
+                                    end=upper_x + AOD_SEP *
+                                    (layer['col'][col_id]['offset_begin'] -
+                                     upper_offset) + 1)
+
                             # if there is a col on the left of the cols for loading
-                            elif layer['col'][col_id]['offset_begin'] < lower_offset:
+                            elif layer['col'][col_id]['offset_begin'] <\
+                                    lower_offset:
                                 reloadRow_obj.add_col_shift(
-                                    id=col_id, begin=self.cols[col_id].x, end=lower_x+AOD_SEP*(layer['col'][col_id]['offset_begin']-lower_offset)-1)
+                                    id=col_id,
+                                    begin=cols[col_id].x,
+                                    end=lower_x + AOD_SEP *
+                                    (layer['col'][col_id]['offset_begin'] -
+                                     lower_offset) - 1)
                             # if there is a col in the middle of the cols for loading
                             else:
                                 reloadRow_obj.add_col_shift(
-                                    id=col_id, begin=self.cols[col_id].x, end=lower_x+AOD_SEP*(layer['col'][col_id]['offset_begin']-lower_offset))
+                                    id=col_id,
+                                    begin=cols[col_id].x,
+                                    end=lower_x + AOD_SEP *
+                                    (layer['col'][col_id]['offset_begin'] -
+                                     lower_offset))
 
                     pickup_qs += site_qs
 
-                # collect all col shifts for this row and apply
-                reloadRow_obj.generate_col_shift(
-                    self.cols, self.rows, self.qubits)
-                reloadRow_obj.generate_row_activate(self.cols, self.rows, self.qubits,
-                                                    cols_to_active, x_to_activate, layer['row'][row_id]['y_begin']*Y_SITE_SEP, pickup_qs)
-                # the number of rows in the same site_y
+                # apply all the col shifts added previously
+                reloadRow_obj.generate_col_shift(cols, rows, qubits)
+                reloadRow_obj.generate_row_activate(
+                    cols,
+                    rows,
+                    qubits,
+                    cols_to_active,
+                    x_to_activate,
+                    layer['row'][row_id]['y_begin']*Y_SITE_SEP,
+                    pickup_qs
+                )
+
+                # shift down the finished row because later on, some other row
+                # may need to adjust the Cols again and if we keep this row
+                # as is, some qubits may collid into each other since at each
+                # site, the y of two SLM traps are the same.
                 num_rows = len(layer['y_rows_begin']
                                [layer['row'][row_id]['y_begin']])
                 shift_down = (
                     num_rows - layer['row'][row_id]['offset_begin'])*AOD_SEP
+                # Also shift the Cols by 1 to avoid collisions.
                 col_idx = [col_id for col_id,
-                           col in enumerate(self.cols) if col.active]
-                col_begin = [self.cols[col_id].x for col_id in col_idx]
-                col_end = [1+layer['col'][col_id]['x_begin']*X_SITE_SEP+AOD_SEP *
-                           layer['col'][col_id]['offset_begin'] for col_id in col_idx]
+                           col in enumerate(cols) if col.active]
+                col_begin = [cols[col_id].x for col_id in col_idx]
+                col_end = [1 + layer['col'][col_id]['x_begin'] * X_SITE_SEP +
+                           AOD_SEP * layer['col'][col_id]['offset_begin']
+                           for col_id in col_idx]
                 reloadRow_obj.generate_parking(
-                    self.cols, self.rows, self.qubits, shift_down, col_idx, col_begin, col_end)
+                    cols,
+                    rows,
+                    qubits,
+                    shift_down,
+                    col_idx,
+                    col_begin,
+                    col_end
+                )
 
-        self.code += reload_obj.emit()
-        self.code_full += reload_obj.emit_full()
+        program.append_inst(reload_obj)
 
-    def builder_move(self, s: int):
-
-        col_idx = []
-        col_begin = []
-        col_end = []
-        for col_id in range(self.c_high):
-            if self.cols[col_id].active:
-                col_idx.append(col_id)
-                col_begin.append(self.cols[col_id].x)
-                site_x = self.layers[s]['col'][col_id]['x_end']
-                offset = self.layers[s]['col'][col_id]['offset_end']
-                col_end.append(1+site_x*X_SITE_SEP + AOD_SEP*offset)
-
-        row_idx = []
-        row_begin = []
-        row_end = []
-        for row_id in range(self.r_high):
-            if self.rows[row_id].active:
-                row_idx.append(row_id)
-                row_begin.append(self.rows[row_id].y)
-                site_y = self.layers[s]['row'][row_id]['y_end']
-                offset = self.layers[s]['row'][row_id]['offset_end']
-                row_end.append(site_y*Y_SITE_SEP + AOD_SEP*(1+offset))
-
-        obj = Move(s=s,
-                   col_objs=self.cols,
-                   row_objs=self.rows,
-                   qubit_objs=self.qubits,
-                   col_idx=col_idx,
-                   col_begin=col_begin,
-                   col_end=col_end,
-                   row_idx=row_idx,
-                   row_begin=row_begin,
-                   row_end=row_end,
-                   prefix=f'BigMove_{s}')
-        self.code.append(obj.emit())
-        self.code_full.append(obj.emit_full())
-
-    def builder_offload(self, s: int):
+    def builder_offload(
+            self,
+            s: int,
+            cols: Sequence[Col],
+            rows: Sequence[Row],
+            qubits: Sequence[Qubit],
+            program: ComboInst,
+    ):
         offload_obj = Offload(s)
         layer = self.layers[s]
+        # the row-by-row processing is quite similar to Reload
         for row_id in range(self.r_high):
-            if self.rows[row_id].active:
+            if rows[row_id].active:
                 dropoff_qs = []
                 offloadRow_obj = offload_obj.add_row_offload(row_id)
                 for site_x in range(self.x_high):
                     site_q_slm = []
                     site_q_aod = []
                     for q_id, q in enumerate(layer['qubits']):
-                        if (q['x'], q['y']) == (site_x, layer['row'][row_id]['y_end']):
-                            if self.qubits[q_id].array == 'AOD' and q['r'] == row_id:
+                        if (
+                            q['x'], q['y']
+                        ) == (
+                            site_x, layer['row'][row_id]['y_end']
+                        ):
+                            if (qubits[q_id].array == 'AOD'
+                                    and q['r'] == row_id):
                                 dropoff_qs.append(q_id)
                                 site_q_aod.append(q_id)
-                            if self.qubits[q_id].array == 'SLM':
+                            if qubits[q_id].array == 'SLM':
                                 site_q_slm.append(q_id)
-                    if len(site_q_aod) == 1:
-                        q_id = site_q_aod[0]
-                        col_id_left = layer['qubits'][q_id]['c']
-                        col_id_right = col_id_left
-                        lower_offset = layer['col'][col_id_left]['offset_end']
-                        upper_offset = lower_offset
-                        lower_x = X_SITE_SEP*site_x
-                        if site_q_slm:
-                            lower_x = 2*X_SITE_SEP*site_x + \
-                                SITE_WIDTH - self.qubits[site_q_slm[0]].x
-                        upper_x = lower_x
-                        offloadRow_obj.add_col_shift(
-                            id=col_id_left, begin=self.qubits[q_id].x, end=lower_x)
-                    elif len(site_q_aod) == 2:
+                    if len(site_q_aod) == 2:
                         [q_id_left, q_id_right] = site_q_aod
-                        if layer['qubits'][q_id_left]['c'] > layer['qubits'][q_id_right]['c']:
+                        if layer['qubits'][q_id_left]['c'] >\
+                                layer['qubits'][q_id_right]['c']:
                             tmp = q_id_left
                             q_id_left = q_id_right
                             q_id_right = tmp
@@ -1273,66 +1841,139 @@ class CodeGen():
                         upper_x = X_SITE_SEP*site_x + SITE_WIDTH
 
                         offloadRow_obj.add_col_shift(
-                            id=col_id_left, begin=self.qubits[q_id_left].x, end=lower_x)
+                            id=col_id_left,
+                            begin=qubits[q_id_left].x,
+                            end=lower_x
+                        )
                         offloadRow_obj.add_col_shift(
-                            id=col_id_right, begin=self.qubits[q_id_right].x, end=upper_x)
+                            id=col_id_right,
+                            begin=qubits[q_id_right].x,
+                            end=upper_x
+                        )
+                    elif len(site_q_aod) == 1:
+                        q_id = site_q_aod[0]
+                        col_id_left = layer['qubits'][q_id]['c']
+                        col_id_right = col_id_left
+                        lower_offset = layer['col'][col_id_left]['offset_end']
+                        upper_offset = lower_offset
+                        lower_x = X_SITE_SEP*site_x
+                        if site_q_slm:
+                            lower_x = 2*X_SITE_SEP*site_x + \
+                                SITE_WIDTH - qubits[site_q_slm[0]].x
+                        upper_x = lower_x
+                        offloadRow_obj.add_col_shift(
+                            id=col_id_left,
+                            begin=qubits[q_id].x,
+                            end=lower_x
+                        )
                     elif len(site_q_aod) > 2:
                         raise ValueError(
-                            f"builder offload {s} row {row_id} site {site_x}: more than 2 qubits")
+                            f"builder offload {s} row {row_id} site {site_x}:"
+                            f" more than 2 qubits"
+                        )
                     else:
                         continue
 
                     for col_id in layer['x_cols_end'][site_x]:
-                        if self.cols[col_id].active and col_id != col_id_left and col_id != col_id_right:
-                            if layer['col'][col_id]['offset_end'] > upper_offset:
+                        if (cols[col_id].active
+                            and col_id != col_id_left
+                                and col_id != col_id_right):
+                            if layer['col'][col_id]['offset_end'] >\
+                                    upper_offset:
                                 offloadRow_obj.add_col_shift(
-                                    id=col_id, begin=self.cols[col_id].x, end=upper_x+AOD_SEP*(layer['col'][col_id]['offset_end']-upper_offset)+1)
-                            elif layer['col'][col_id]['offset_end'] < lower_offset:
+                                    id=col_id,
+                                    begin=cols[col_id].x,
+                                    end=upper_x + AOD_SEP *
+                                    (layer['col'][col_id]['offset_end'] -
+                                     upper_offset) + 1
+                                )
+                            elif layer['col'][col_id]['offset_end'] <\
+                                    lower_offset:
                                 offloadRow_obj.add_col_shift(
-                                    id=col_id, begin=self.cols[col_id].x, end=lower_x+AOD_SEP*(layer['col'][col_id]['offset_end']-lower_offset)-1)
+                                    id=col_id,
+                                    begin=cols[col_id].x,
+                                    end=lower_x + AOD_SEP *
+                                    (layer['col'][col_id]['offset_end'] -
+                                     lower_offset) - 1
+                                )
                             else:
                                 offloadRow_obj.add_col_shift(
-                                    id=col_id, begin=self.cols[col_id].x, end=lower_x+AOD_SEP*(layer['col'][col_id]['offset_end']-lower_offset))
+                                    id=col_id,
+                                    begin=cols[col_id].x,
+                                    end=lower_x + AOD_SEP *
+                                    (layer['col'][col_id]['offset_end'] -
+                                     lower_offset)
+                                )
 
-                offloadRow_obj.generate_col_shift(
-                    self.cols, self.rows, self.qubits)
+                # align the Cols to the correct locatios
+                offloadRow_obj.generate_col_shift(cols, rows, qubits)
+                # the rows are at the parked location finishing a BigMove,
+                # so we need to shift them to align with the SLM traps.
                 offloadRow_obj.generate_row_shift(
-                    self.cols, self.rows, self.qubits, layer['row'][row_id]['y_end'])
+                    cols,
+                    rows,
+                    qubits,
+                    layer['row'][row_id]['y_end']
+                )
                 offloadRow_obj.generate_row_deactivate(
-                    self.cols, self.rows, self.qubits, dropoff_qs)
-        offload_obj.all_cols_deactivate(self.cols, self.rows, self.qubits)
-        self.code += offload_obj.emit()
-        self.code_full += offload_obj.emit_full()
+                    cols, rows, qubits, dropoff_qs)
+        offload_obj.all_cols_deactivate(cols, rows, qubits)
+        program.append_inst(offload_obj)
 
 
 class Animator():
-    def __init__(self, code_file_name, scaling_factor=PT_MICRON, font=10, ffmpeg='ffmpeg', real_speed=False, show_graph=False, edges=None, dir: str = None):
+    """generate animation movie from code_full files."""
+
+    def __init__(self,
+                 code_file_name: str,
+                 scaling_factor: int = PT_MICRON,
+                 font: int = 10,
+                 ffmpeg: str = 'ffmpeg',
+                 real_speed: bool = False,
+                 show_graph: bool = False,
+                 edges: Sequence[Sequence[int]] | None = None,
+                 dir: str | None = None
+                 ):
+        """
+        Args:
+            code_file_name (str): file name of code_full generated by CodeGen.
+            scaling_factor (int, optional): the unit scaling factor between the
+             animation and um. Defaults to PT_MICRON.
+            font (int, optional): font size in the animation. Defaults to 10.
+            ffmpeg (str, optional): path of ffmpeg. Defaults to 'ffmpeg'.
+            real_speed (bool, optional): whether to use real speed in the
+                movements in Relaod and Offload. Defaults to False.
+            show_graph (bool, optional): whether show the graph on the right
+                side of the DPQA in the animation. Defaults to False.
+            edges (Sequence[Sequence[int]] | None, optional): the edges of the
+                graph. Defaults to None.
+            dir (str | None, optional): dir to save output. Defaults to None.
+        """
         matplotlib.use('Agg')
         matplotlib.rcParams.update({'font.size': font})
         plt.rcParams['animation.ffmpeg_path'] = ffmpeg
-        self.scaling = scaling_factor
-        self.code_file = code_file_name
-        self.animation_file = dir + (code_file_name.replace(
-            '.json', '.mp4')).split('/')[-1]
-        self.real_speed = real_speed
         self.show_graph = show_graph
-        if show_graph:
-            self.graph_edges = edges
-            self.graph_alpha = [1 for _ in range(len(self.graph_edges))]
-            self.graph_color = ['black' for _ in range(len(self.graph_edges))]
-            self.previous_edges = None
-        self.read_files()
+        self.graph_edges = edges
+        self.read_files(code_file_name)
 
         self.keyframes = []
-        self.setup_canvas()
-        self.create_master_schedule()
+        self.setup_canvas(scaling_factor)
+        self.create_master_schedule(real_speed)
 
-        anim = FuncAnimation(self.fig, self.update, init_func=self.update_init, frames=self.keyframes[-1],
-                             interval=1000/FPS)
-        anim.save(self.animation_file, writer=FFMpegWriter(FPS))
+        anim = FuncAnimation(
+            self.fig,
+            self.update,
+            init_func=self.update_init,
+            frames=self.keyframes[-1],
+            interval=1000/FPS
+        )
 
-    def read_files(self):
-        with open(self.code_file, 'r') as f:
+        animation_file = dir + (code_file_name.replace(
+            '_code_full.json', '.mp4')).split('/')[-1]
+        anim.save(animation_file, writer=FFMpegWriter(FPS))
+
+    def read_files(self, code_file: str):
+        with open(code_file, 'r') as f:
             self.code = json.load(f)
 
         self.n_q = self.code[0]['n_q']
@@ -1341,32 +1982,84 @@ class Animator():
         self.c_high = self.code[0]['c_high']
         self.r_high = self.code[0]['r_high']
 
-    def create_master_schedule(self):
-        frame = 0
+    def create_master_schedule(self, real_speed: bool):
+        """create a list of keyframes. We need this to calculate how many
+        frames are there in total when we call FuncAnimation."""
+
+        frame = 0  # the beginning frame of the Inst currently considered
         for inst in self.code:
-            if not self.real_speed:
+            # if not using real speed, make all the movements in Reload
+            # and Offload 1 frame
+            if not real_speed:
                 if inst['type'] == 'Move' and 'BigMove' not in inst['name']:
                     inst['duration'] = 1
+
+            # Rydberg interaction is much shorter compared to the movements,
+            # so using real speed, we will never see Rydberg.
+            if inst['type'] == 'Rydberg':
+                inst['duration'] = MUS_PER_FRM * 8  # i.e., 8 frames
+
+            # Activate and Deactivate is on par with some movements in terms of
+            # duration, but we do not have ramping-up or -down animations yet,
+            # so we opt for them taking 1 frame.
+            if inst['type'] == 'Activate' or inst['type'] == 'Deactivate':
+                inst['duration'] = MUS_PER_FRM
+
             inst['f_begin'] = frame
-            new_frame = frame + int((inst['duration'] +
-                                     MUS_PER_FRM - 1)/MUS_PER_FRM)
+            # new_frame = frame + ceil(duration / MUS_PER_FRM)
+            new_frame = frame +\
+                int((inst['duration'] + MUS_PER_FRM - 1)/MUS_PER_FRM)
+            # new_frame is the begining of the next Inst, so end of this one is
             inst['f_end'] = new_frame-1
             self.keyframes.append(new_frame)
             frame = new_frame
 
-    def setup_canvas(self):
-        px = 1/plt.rcParams['figure.dpi'] * self.scaling
+    """layout of the DPQA plot:
+          ____________________________________________________________________
+          |                                  ^                               |
+          |                        Y_HIGH_PAD|                    X_HIGH_PAD |
+        y |                                  V                  |<---------->|
+         -|-         o   o              o   o--             o   o            |
+        t |                                                 |<->|            |
+        i |                   ...                    .   X_SITE_WIDTH        |
+        c |                                         .                        |
+        k |                                        .                         |
+         -|-         o   o              o   o             --o   o            |
+          |          |<---X_SITE_SEP--->|                  ^                 |
+          |                                        ...     |Y_SITE_SEP       |
+          |                                                V                 |
+         -|-         o   o              o   o--           --o   o            |
+          |          |                       ^                               |
+          | X_LOW_PAD|              Y_LOW_PAD|                               |
+          |<-------->|                       |                               |
+          |____________|__________________|__V________________|______________|
+                       |                  |                   |
+                          x tick
+        """
+
+    def setup_canvas(self, scaling_factor: int):
+        """set up various objects before actually drawing."""
+
+        # unit conversion factor from um to pt
+        px = 1/plt.rcParams['figure.dpi'] * scaling_factor
+
         self.X_LOW = -X_LOW_PAD
         self.X_HIGH = SITE_WIDTH + \
-            (self.x_high-0-1)*X_SITE_SEP + X_HIGH_PAD
+            (self.x_high-1)*X_SITE_SEP + X_HIGH_PAD
         self.Y_LOW = -Y_LOW_PAD
-        self.Y_HIGH = (self.y_high-0-1)*Y_SITE_SEP + Y_HIGH_PAD
-        self.fig, ax = plt.subplots(1, 2, gridspec_kw={'width_ratios': [3, 1]}, figsize=((self.X_HIGH-self.X_LOW)*px*4/3,
-                                                                                         (self.Y_HIGH-self.Y_LOW)*px))
+        self.Y_HIGH = (self.y_high-1)*Y_SITE_SEP + Y_HIGH_PAD
+
+        # 1 row 2 col, DPQA on the left, the graph on the right
+        self.fig, (self.ax, self.network_ax) = plt.subplots(
+            1,
+            2,
+            gridspec_kw={'width_ratios': [3, 1]},
+            figsize=((self.X_HIGH-self.X_LOW)*px*4/3,
+                     (self.Y_HIGH-self.Y_LOW)*px)
+        )
         self.fig.tight_layout()
-        self.ax = ax[0]
-        self.network_ax = ax[1]
-        self.network = nx.Graph()
+
+        self.title = self.ax.set_title('')
         self.ax.set_xlim([self.X_LOW, self.X_HIGH])
         self.ax.set_xticks(
             [SITE_WIDTH/2+X_SITE_SEP*i for i in range(self.x_high)])
@@ -1376,37 +2069,46 @@ class Animator():
         self.ax.set_yticks(
             [Y_SITE_SEP*i for i in range(self.y_high)])
         self.ax.set_yticklabels([i for i in range(self.y_high)])
-        if self.show_graph:
-            self.network_ax.set_title('The 3-regular graph')
-        self.title = self.ax.set_title('')
 
+        if self.show_graph:
+            self.network = nx.Graph()
+            self.network_ax.set_title('The 3-regular graph')
+
+        # draw all the SLMs used throught out the computation
         # slm_xs = [slm[0] for slm in self.code[0]['all_slms']]
         # slm_ys = [slm[1] for slm in self.code[0]['all_slms']]
         # self.ax.scatter(slm_xs, slm_ys, marker='o', s=50,
         #                 facecolor='none', edgecolor=(0, 0, 1, 0.5))
 
     def update_init(self):
-        slm_xs = [xy[0] for xy in self.code[0]["slm_qubit_xys"]]
-        slm_ys = [xy[1] for xy in self.code[0]["slm_qubit_xys"]]
-        self.qubit_scat = self.ax.scatter(slm_xs, slm_ys, c='b')
+        # init the Qubits, Cols, and Rows. Later just update their attributes
+        self.qubit_scat = self.ax.scatter([0 for _ in range(self.n_q)],
+                                          [0 for _ in range(self.n_q)])
+        self.qubit_scat.set_color((0, 0, 1, 0))
         self.col_plots = [self.ax.axvline(0, self.Y_LOW, self.Y_HIGH, c=(
             1, 0, 0, 0), ls='--') for _ in range(self.c_high)]
         self.row_plots = [self.ax.axhline(0, self.X_LOW, self.X_HIGH, c=(
             1, 0, 0, 0), ls='--') for _ in range(self.c_high)]
 
+        # draw the graph with black thin edges
         if self.show_graph:
             self.network.add_edges_from(self.graph_edges)
             self.pos = nx.spring_layout(self.network)
-            nx.draw(self.network, pos=self.pos, ax=self.network_ax,
-                    with_labels=True, edgecolors='black', node_color='lightgray')
+            nx.draw(
+                self.network,
+                pos=self.pos,
+                ax=self.network_ax,
+                with_labels=True,
+                edgecolors='black',
+                node_color='lightgray'
+            )
         return
 
     def update(self, f: int):  # f is the frame
         if f < self.keyframes[0]:
             return
-        for i in range(len(self.code)):
+        for i, inst in enumerate(self.code):
             if f >= self.keyframes[i-1] and f < self.keyframes[i]:
-                inst = self.code[i]
                 if inst['type'] == 'Rydberg':
                     return self.update_rydberg(f, inst)
                 elif inst['type'] == 'Move':
@@ -1420,45 +2122,53 @@ class Animator():
                 else:
                     raise ValueError(f"unknown inst type {inst['type']}")
 
-    # s is the stage like in compiled results
-    # f is the relative frame in this frame group
     def update_rydberg(self, f: int, inst: dict):
         edges = [(g['q0'], g['q1']) for g in inst['gates']]
         if f == inst['f_begin']:
             self.title.set_text(inst['name'])
-            self.texts = []
+
+            # find the qubits involved in 2Q gates and annotate their ids
             active_qubits = []
             for g in inst['gates']:
                 active_qubits += [g['q0'], g['q1']]
-            for q_id in active_qubits:
-                self.texts.append(
-                    self.ax.text(inst['state']['qubits'][q_id]['x']+1, inst['state']['qubits'][q_id]['y']+1, q_id))
-            # adjust_text(self.texts)
+            self.texts = [
+                self.ax.text(inst['state']['qubits'][q_id]['x'] + 1,
+                             inst['state']['qubits'][q_id]['y'] + 1,
+                             q_id) for q_id in active_qubits
+            ]
+
+            # whole plane lights up (alpha=.2 blue)
             self.ax.set_facecolor((0, 0, 1, 0.2))
-            if f == 0:
-                self.qubit_scat.set_offsets(
-                    [(q['x'], q['y']) for q in inst['state']['qubits']])
-                self.qubit_scat.set_color((0, 0, 1, 1))
-            # print([q['x'] for q in inst['state']['qubits']])
-            # print([q['y'] for q in inst['state']['qubits']])
+
+            # draw SLM qubits in blue and at the correct locations
+            self.qubit_scat.set_offsets(
+                [(q['x'], q['y']) for q in inst['state']['qubits']])
+            self.qubit_scat.set_color((0, 0, 1, 1))
 
         if self.show_graph and f == int((inst['f_begin'] + inst['f_end'])/2):
+            # draw some edges in the graph (each corresponding to a 2Q gate
+            # executed at this Rydberg stage) in thicker blue
             nx.draw_networkx_edges(
-                self.network, pos=self.pos, edgelist=edges, edge_color='blue', ax=self.network_ax, width=4)
-            # print(edges)
-            # if self.previous_edges:
-            #     nx.draw_networkx_edges(
-            #     self.network, pos=self.pos, edgelist=self.previous_edges, edge_color='white', ax=self.network_ax, width=4)
-            #     nx.draw_networkx_edges(
-            #     self.network, pos=self.pos, edgelist=self.previous_edges, edge_color='black', ax=self.network_ax, width=1)
+                self.network,
+                pos=self.pos,
+                edgelist=edges,
+                edge_color='blue',
+                ax=self.network_ax,
+                width=4
+            )
 
         if f == inst['f_end']:
+            # clean up the annotations and blue background at finishing frame
             self.ax.set_facecolor('w')
             for text in self.texts:
                 text.remove()
-            self.previous_edges = edges
 
     def interpolate(self, progress: int, duration: int, begin: int, end: int):
+        """implement cubic interpolation per Bluvstein et al.
+        Suppose we want to move from x=begin at t=0 to x=end at t=duration
+        if we are at t=progress*duration, return our x. (0<= progress <=1)
+        """
+
         D = end - begin
         if D == 0:
             return begin
@@ -1469,21 +2179,23 @@ class Animator():
         if f == inst['f_begin']:
             self.title.set_text(inst['name'])
 
+        # needs to change location every frame, as below
         progress = f - inst['f_begin']
         duration = inst['f_end'] - inst['f_begin'] + 1
+
         col_xs = [col['x'] for col in prev_state['cols']]
         for col in inst['cols']:
             curr_x = self.interpolate(
                 progress, duration, col['begin'], col['end'])
             col_xs[col['id']] = curr_x
-            self.col_plots[col['id']].set_xdata(col_xs[col['id']])
+            self.col_plots[col['id']].set_xdata((col_xs[col['id']], ))
 
         row_ys = [row['y'] for row in prev_state['rows']]
         for row in inst['rows']:
             curr_y = self.interpolate(
                 progress, duration, row['begin'], row['end'])
             row_ys[row['id']] = curr_y
-            self.row_plots[row['id']].set_ydata(row_ys[row['id']])
+            self.row_plots[row['id']].set_ydata((row_ys[row['id']], ))
 
         q_xs = [q['x'] for q in prev_state['qubits']]
         q_ys = [q['y'] for q in prev_state['qubits']]
@@ -1493,38 +2205,39 @@ class Animator():
                 q_ys[q_id] = row_ys[prev_state['qubits'][q_id]['r']]
         self.qubit_scat.set_offsets([(q_xs[i], q_ys[i])
                                     for i in range(self.n_q)])
-        # if 'BigMove' in inst['name'] and (f == inst['f_begin'] or f == inst['f_end']):
-        #     print(q_xs)
-        #     print(q_ys)
-        #     print([q['array'] for q in prev_state['qubits']])
-
-        return self.col_plots
+        return
 
     def update_activate(self, f: int, inst: dict):
         if f == inst['f_begin']:
             self.title.set_text(inst['name'])
+
+            # set Cols/Rows to activate to the correct location and turn red.2
             for id, col in enumerate(inst['col_idx']):
-                self.col_plots[col].set_xdata(inst['col_xs'][id])
+                self.col_plots[col].set_xdata((inst['col_xs'][id], ))
                 self.col_plots[col].set_color((1, 0, 0, 0.2))
+
             for id, row in enumerate(inst['row_idx']):
-                self.row_plots[row].set_ydata(inst['row_ys'][id])
+                self.row_plots[row].set_ydata((inst['row_ys'][id], ))
                 self.row_plots[row].set_color((1, 0, 0, 0.2))
 
-        # if f == inst['f_begin'] + int(inst['duration']/2):
+            # SLM qubits remain blue while qubits being picked up turns red
             self.qubit_scat.set_color(
-                ['b' if q['array'] == 'SLM' else 'r' for q in inst['state']['qubits']])
+                ['b' if q['array'] == 'SLM' else 'r'
+                 for q in inst['state']['qubits']])
 
     def update_deactivate(self, f: int, inst: dict):
         if f == inst['f_end']:
             self.title.set_text(inst['name'])
+
+            self.qubit_scat.set_color(
+                ['b' if q['array'] == 'SLM' else 'r'
+                 for q in inst['state']['qubits']])
+
+            # deactivate Cols/Rows by setting alpha=0
             for col in inst['col_idx']:
                 self.col_plots[col].set_color((1, 0, 0, 0))
             for row in inst['row_idx']:
                 self.row_plots[row].set_color((1, 0, 0, 0))
-
-        # if f == inst['f_begin'] + int(inst['duration']/2):
-            self.qubit_scat.set_color(
-                ['b' if q['array'] == 'SLM' else 'r' for q in inst['state']['qubits']])
 
 
 if __name__ == "__main__":
@@ -1535,7 +2248,9 @@ if __name__ == "__main__":
     parser.add_argument('--font', help='font size in the animation', type=int)
     parser.add_argument('--ffmpeg', help='custom ffmpeg path', type=str)
     parser.add_argument(
-        '--realSpeed', help='use real speed in the animation of reload and offload procedures', action='store_true')
+        '--realSpeed',
+        help='real speed in the animation of reload and offload procedures',
+        action='store_true')
     parser.add_argument(
         '--noGraph', help='do not show graph on the side', action='store_true')
     parser.add_argument('--dir', help='working directory', type=str)
