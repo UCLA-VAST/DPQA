@@ -684,7 +684,9 @@ class DPQA:
             x: Sequence[Sequence[Any]],
             y: Sequence[Sequence[Any]],
     ):
-        real_s = len(self.result_json['layers'])+s-1
+        real_s = len(self.result_json['layers'])
+        if real_s == 0 and s == 0:
+            real_s = -1
         if self.print_detail:
             print(f"        stage {real_s}:")
         layer = {}
@@ -757,7 +759,7 @@ class DPQA:
             t: Sequence[Any],
     ):
         model = (self.dpqa).model()
-        
+
         for s in range(num_stage):
             layer = self.read_partial_solution(s, model, a, c, r, x, y)
 
