@@ -26,7 +26,6 @@ if str(args.size) in graphs.keys() and args.id in range(10):
     tmp.setProgram(graphs[str(args.size)][args.id])
 else:
     raise ValueError(f'No such graph {args.size}_{args.id}.')
-tmp.setPureGraph()
 tmp.setCommutation()
 tmp.hybrid_strategy()
-tmp.solve()
+tmp.solve(save_file=True)

@@ -136,13 +136,15 @@ class DPQA:
         self.satisfiable = False
         self.all_aod = False
         self.no_transfer = False
-        self.pure_graph = False
         self.result_json = {}
         self.result_json['name'] = name
         self.result_json['layers'] = []
         self.row_per_site = 3
         self.cardenc = "pysat"
         self.optimal_ratio = None
+        self.non_front_g_q = []
+        self.non_front_g_s = []
+        self.non_front_g_i = []
 
     def setOptimalRatio(self, ratio: float):
         self.optimal_ratio = ratio
@@ -155,6 +157,7 @@ class DPQA:
         # assume program is a iterable of pairs of qubits in 2Q gate
         # assume that the qubit indices used are consecutively 0, 1, ...
         self.n_g = len(program)
+        self.g_i = [i for i in range(self.n_g)]
         tmp = [(min(pair), max(pair)) for pair in program]
         self.g_q = tuple(tmp)
         self.g_s = tuple(['CRZ' for _ in range(self.n_g)])
@@ -167,29 +170,28 @@ class DPQA:
             self.n_q = nqubit
         self.dependencies = dependencyExtract(self.g_q, self.n_q)
         self.n_t = pushLeftDepth(self.g_q, self.n_q)
+        self.collisions = collisionExtract(self.g_q)
 
-        # for graph state circuit
+        self.updateGateIndexMatrix()
+
+    def updateGateIndexMatrix(self):
         self.gate_index = {}
         for i in range(self.n_q):
             for j in range(i+1, self.n_q):
-                self.gate_index[(i, j)] = -1
+                self.gate_index[(i, j)] = []
         for i in range(self.n_g):
-            self.gate_index[self.g_q[i]] = i
-        self.gate_index_original = self.gate_index
+            self.gate_index[self.g_q[i]].append(i)
 
     def setCommutation(self):
         self.all_commutable = True
-        self.collisions = collisionExtract(self.g_q)
         self.n_t = maxDegree(self.g_q, self.n_q)
+        self.dependencies = []
 
     def setAOD(self):
         self.all_aod = True
 
     def setDepth(self, depth: int):
         self.n_t = depth
-
-    def setPureGraph(self):
-        self.pure_graph = True
 
     def setNoTransfer(self):
         self.no_transfer = True
@@ -209,7 +211,6 @@ class DPQA:
         self.result_json['all_commutable'] = self.all_commutable
         self.result_json['all_aod'] = self.all_aod
         self.result_json['no_transfer'] = self.no_transfer
-        self.result_json['pure_graph'] = self.pure_graph
         self.result_json['n_c'] = self.n_c
         self.result_json['n_r'] = self.n_r
         self.result_json['n_x'] = self.n_x
@@ -223,20 +224,24 @@ class DPQA:
         # remove gate_ids from the gates to execute
         new_g_q = []
         new_g_s = []
+        new_g_i = []
         for i in range(len(self.g_q)):
             if i not in gate_ids:
                 new_g_q.append(self.g_q[i])
                 new_g_s.append(self.g_s[i])
+                new_g_i.append(self.g_i[i])
+        new_g_q += self.non_front_g_q
+        new_g_s += self.non_front_g_s
+        new_g_i += self.non_front_g_i
         self.g_q = tuple(new_g_q)
         self.g_s = tuple(new_g_s)
+        self.g_i = tuple(new_g_i)
 
         # for graph state circuit, update gate_index matrix
-        for q0 in range(self.n_q):
-            for q1 in range(q0+1, self.n_q):
-                self.gate_index[(q0, q1)] = -1
-        for g in range(len(self.g_q)):
-            self.gate_index[self.g_q[g]] = g
+        self.n_g = len(self.g_q)
+        self.updateGateIndexMatrix()
         self.collisions = collisionExtract(self.g_q)
+        self.dependencies = dependencyExtract(self.g_q, self.n_q)
 
     def constraint_all_aod(
             self,
@@ -417,19 +422,19 @@ class DPQA:
             c: Sequence[Sequence[Any]],
             r: Sequence[Sequence[Any]],
     ):
-        if self.pure_graph:
-            # bound number of atoms in each site, needed if not double counting
-            for q0 in range(self.n_q):
-                for q1 in range(q0+1, self.n_q):
-                    for s in range(num_stage):
-                        (self.dpqa).add(
-                            Implies(And(a[q0][s], a[q1][s]),
-                                    Or(c[q0][s] != c[q1][s],
-                                       r[q0][s] != r[q1][s])))
-                        (self.dpqa).add(
-                            Implies(And(Not(a[q0][s]), Not(a[q1][s])),
-                                    Or(x[q0][s] != x[q1][s],
-                                       y[q0][s] != y[q1][s])))
+
+        # bound number of atoms in each site, needed if not double counting
+        for q0 in range(self.n_q):
+            for q1 in range(q0+1, self.n_q):
+                for s in range(num_stage):
+                    (self.dpqa).add(
+                        Implies(And(a[q0][s], a[q1][s]),
+                                Or(c[q0][s] != c[q1][s],
+                                    r[q0][s] != r[q1][s])))
+                    (self.dpqa).add(
+                        Implies(And(Not(a[q0][s]), Not(a[q1][s])),
+                                Or(x[q0][s] != x[q1][s],
+                                    y[q0][s] != y[q1][s])))
 
     def constraint_no_swap(
             self,
@@ -534,7 +539,8 @@ class DPQA:
                 # connectivity, so if a gate is in stage0, we can ignore all
                 # its collisions. If both gates are not in stage0, we impose.
         else:
-            raise ValueError("Do not support non graph-like circuits.")
+            for dependency in self.dependencies:
+                (self.dpqa).add(t[dependency[0]] < t[dependency[1]])
 
     def constraint_connectivity(
             self,
@@ -559,30 +565,20 @@ class DPQA:
             x: Sequence[Sequence[Any]],
             y: Sequence[Sequence[Any]],
     ):
-        if self.pure_graph:
-            # global CZ switch (only works for graph state circuit)
-            for q0 in range(self.n_q):
-                for q1 in range(q0+1, self.n_q):
-                    for s in range(1, num_stage):
-                        if self.gate_index[(q0, q1)] == -1:
-                            (self.dpqa).add(
-                                Or(x[q0][s] != x[q1][s], y[q0][s] != y[q1][s]))
-                        else:
-                            (self.dpqa).add(Implies
-                                            (And(x[q0][s] == x[q1][s],
-                                                 y[q0][s] == y[q1][s]
-                                                 ),
-                                             t[self.gate_index[(q0, q1)]] == s)
-                                            )
-        else:
-            raise ValueError("Do not support non graph-like circuits.")
-            # global CZ switch
-            # (self.dpqa).add(
-            #     self.n_g == sum([
-            #         If(And(x[i][k] == x[j][k], y[i][k] == y[j][k]), 1, 0)
-            #         for i in range(self.n_q) for j in range(i+1, self.n_q)
-            #         for k in range(self.n_t)
-            #     ]))
+        # global CZ switch (only works for graph state circuit)
+        for q0 in range(self.n_q):
+            for q1 in range(q0+1, self.n_q):
+                for s in range(1, num_stage):
+                    if not self.gate_index[(q0, q1)]:
+                        (self.dpqa).add(
+                            Or(x[q0][s] != x[q1][s], y[q0][s] != y[q1][s]))
+                    else:
+                        (self.dpqa).add(Implies
+                                        (And(x[q0][s] == x[q1][s],
+                                             y[q0][s] == y[q1][s]
+                                             ),
+                                            Or([t[g] == s for g in self.gate_index[(q0, q1)]]))
+                                        )
 
     def constraint_gate_batch(
             self,
@@ -789,8 +785,7 @@ class DPQA:
                             )
                         layer['gates'].append(
                             {
-                                'id': self.gate_index_original[
-                                    (self.g_q[g][0], self.g_q[g][1])],
+                                'id': self.g_i[g],
                                 'q0': self.g_q[g][0],
                                 'q1': self.g_q[g][1]
                             })
@@ -808,12 +803,38 @@ class DPQA:
         if self.optimal_ratio == 1 and self.n_q < 30:
             self.setNoTransfer()
 
+    def get_front_layer(self):
+        new_idx = []
+        self.non_front_g_q = []
+        self.non_front_g_s = []
+        self.non_front_g_i = []
+        free_q = [1 for _ in range(self.n_q)]
+        for g in range(self.n_g):
+            if free_q[self.g_q[g][0]] and free_q[self.g_q[g][1]]:
+                new_idx.append(g)
+                free_q[self.g_q[g][0]] = 0
+                free_q[self.g_q[g][1]] = 0
+            else:
+                self.non_front_g_q.append(self.g_q[g])
+                self.non_front_g_s.append(self.g_s[g])
+                self.non_front_g_i.append(self.g_i[g])
+
+        self.g_q = [self.g_q[g] for g in new_idx]
+        self.g_s = [self.g_s[g] for g in new_idx]
+        self.g_i = [self.g_i[g] for g in new_idx]
+
+        self.n_g = len(self.g_q)
+        self.updateGateIndexMatrix()
+        self.collisions = collisionExtract(self.g_q)
+        self.dependencies = dependencyExtract(self.g_q, self.n_q)
+
     def solve_greedy(self, step: int,):
         a, c, r, x, y = self.solver_init(step+1)
         total_g_q = len(self.g_q)
         t_curr = 1
 
         while len(self.g_q) > self.optimal_ratio * total_g_q:
+            self.get_front_layer()
             print(f"gate batch {t_curr}")
 
             (self.dpqa).push()  # gate related constraints
@@ -857,7 +878,8 @@ class DPQA:
         solved_batch_gates = True if (self.dpqa).check() == sat else False
 
         while not solved_batch_gates:
-            print(f"    no solution, step={step} too small")
+            if self.print_detail:
+                print(f"    no solution, step={step} too small")
             step += 1
             a, c, r, x, y = self.solver_init(step+1)  # self.dpqa is cleaned
             t = self.constraint_gate_batch(step+1, c, r, x, y)
@@ -868,26 +890,33 @@ class DPQA:
             solved_batch_gates =\
                 True if (self.dpqa).check() == sat else False
 
-        print(f"    found solution with {bound_gate} gates in {step} step")
+        if self.print_detail:
+            print(f"    found solution with {bound_gate} gates in {step} step")
         self.process_partial_solution(step+1, a, c, r, x, y, t)
 
-    def solve(self):
-
+    def solve(self, save_file: bool = True):
+        if self.n_q > self.n_x * self.n_y:
+            print("#qubits > #sites. There may be a problem.")
         self.writeSettingJson()
         t_s = time.time()
         step = 1  # compile for 1 step, or 2 stages each time
         total_g_q = len(self.g_q)
         self.solve_greedy(step)
         if len(self.g_q) > 0:
-            print(f'final {len(self.g_q)/total_g_q*100} percent')
+            if self.print_detail:
+                print(f'final {len(self.g_q)/total_g_q*100} percent')
             self.solve_optimal(step)
 
         self.result_json['timestamp'] = str(time.time())
         self.result_json['duration'] = str(time.time() - t_s)
         self.result_json['n_t'] = len(self.result_json['layers'])
-        print(f"runtime {self.result_json['duration']}")
+        if self.print_detail:
+            print(f"runtime {self.result_json['duration']}")
 
-        if not self.dir:
-            self.dir = "./results/smt/"
-        with open(self.dir + f"{self.result_json['name']}.json", 'w') as f:
-            json.dump(self.result_json, f)
+        if save_file:
+            if not self.dir:
+                self.dir = "./results/smt/"
+            with open(self.dir + f"{self.result_json['name']}.json", 'w') as f:
+                json.dump(self.result_json, f)
+
+        return self.result_json
