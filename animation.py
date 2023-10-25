@@ -1,5 +1,5 @@
 from matplotlib.animation import FFMpegWriter, FuncAnimation
-from typing import Sequence, Mapping, Any
+from typing import Sequence, Mapping, Any, Union
 import matplotlib.pyplot as plt
 import json
 import matplotlib
@@ -73,7 +73,7 @@ class Inst(ABC):
     def __init__(
             self,
             type: str,
-            prefix: str | None = None,
+            prefix: Union[str, None] = None,
             stage: int = -1,
             reduced_keys: Sequence[str] = [],
     ):
@@ -240,7 +240,7 @@ class Init(Inst):
                 'aod_row_ys': aod_row_ys,
             })
 
-    def add_slms(self, slms: Sequence[tuple[int, int]]):
+    def add_slms(self, slms: Sequence[Sequence[int]]):
         for slm in slms:
             if slm not in self.all_slms:
                 self.all_slms.append(slm)
@@ -870,8 +870,8 @@ class ComboInst():
     def __init__(
             self,
             type: str,
-            prefix: str | None = None,
-            suffix: str | None = None,
+            prefix: Union[str, None] = None,
+            suffix: Union[str, None] = None,
             stage: int = -1,
     ):
         """init method for combined instructions.
@@ -902,10 +902,10 @@ class ComboInst():
             code += inst.emit_full()
         return code
 
-    def append_inst(self, inst: Inst | ComboInst):
+    def append_inst(self, inst: Union[Inst, ComboInst]):
         self.insts.append(inst)
 
-    def prepend_inst(self, inst: Inst | ComboInst):
+    def prepend_inst(self, inst: Union[Inst, ComboInst]):
         self.insts.insert(0, inst)
 
     def is_trivial(self) -> bool:
@@ -1931,8 +1931,8 @@ class Animator():
                  ffmpeg: str = 'ffmpeg',
                  real_speed: bool = False,
                  show_graph: bool = False,
-                 edges: Sequence[Sequence[int]] | None = None,
-                 dir: str | None = None
+                 edges: Union[Sequence[Sequence[int]], None] = None,
+                 dir: Union[str, None] = None
                  ):
         """
         Args:
@@ -2049,15 +2049,22 @@ class Animator():
         self.Y_LOW = -Y_LOW_PAD
         self.Y_HIGH = (self.y_high-1)*Y_SITE_SEP + Y_HIGH_PAD
 
-        # 1 row 2 col, DPQA on the left, the graph on the right
-        self.fig, (self.ax, self.network_ax) = plt.subplots(
-            1,
-            2,
-            gridspec_kw={'width_ratios': [3, 1]},
-            figsize=((self.X_HIGH-self.X_LOW)*px*4/3,
-                     (self.Y_HIGH-self.Y_LOW)*px)
-        )
-        self.fig.tight_layout()
+        if self.show_graph:
+            # 1 row 2 col, DPQA on the left, the graph on the right
+            self.fig, (self.ax, self.network_ax) = plt.subplots(
+                1,
+                2,
+                gridspec_kw={'width_ratios': [3, 1]},
+                figsize=((self.X_HIGH-self.X_LOW)*px*4/3,
+                         (self.Y_HIGH-self.Y_LOW)*px)
+            )
+            self.fig.tight_layout()
+            self.network = nx.Graph()
+            self.network_ax.set_title('The 3-regular graph')
+        else:
+            self.fig, self.ax, = plt.subplots(
+                figsize=((self.X_HIGH-self.X_LOW)*px,
+                         (self.Y_HIGH-self.Y_LOW)*px))
 
         self.title = self.ax.set_title('')
         self.ax.set_xlim([self.X_LOW, self.X_HIGH])
@@ -2070,10 +2077,6 @@ class Animator():
             [Y_SITE_SEP*i for i in range(self.y_high)])
         self.ax.set_yticklabels([i for i in range(self.y_high)])
 
-        if self.show_graph:
-            self.network = nx.Graph()
-            self.network_ax.set_title('The 3-regular graph')
-
         # draw all the SLMs used throught out the computation
         # slm_xs = [slm[0] for slm in self.code[0]['all_slms']]
         # slm_ys = [slm[1] for slm in self.code[0]['all_slms']]
@@ -2084,7 +2087,7 @@ class Animator():
         # init the Qubits, Cols, and Rows. Later just update their attributes
         self.qubit_scat = self.ax.scatter([0 for _ in range(self.n_q)],
                                           [0 for _ in range(self.n_q)])
-        self.qubit_scat.set_color((0, 0, 1, 0))
+        self.qubit_scat.set_color('b')
         self.col_plots = [self.ax.axvline(0, self.Y_LOW, self.Y_HIGH, c=(
             1, 0, 0, 0), ls='--') for _ in range(self.c_high)]
         self.row_plots = [self.ax.axhline(0, self.X_LOW, self.X_HIGH, c=(
@@ -2143,7 +2146,6 @@ class Animator():
             # draw SLM qubits in blue and at the correct locations
             self.qubit_scat.set_offsets(
                 [(q['x'], q['y']) for q in inst['state']['qubits']])
-            self.qubit_scat.set_color((0, 0, 1, 1))
 
         if self.show_graph and f == int((inst['f_begin'] + inst['f_end'])/2):
             # draw some edges in the graph (each corresponding to a 2Q gate
