@@ -141,7 +141,7 @@ class DPQA:
         self.result_json['layers'] = []
         self.row_per_site = 3
         self.cardenc = "pysat"
-        self.optimal_ratio = None
+        self.optimal_ratio = 0
         self.non_front_g_q = []
         self.non_front_g_s = []
         self.non_front_g_i = []
@@ -272,7 +272,7 @@ class DPQA:
             r: Sequence[Sequence[Any]],
     ):
         for q in range(self.n_q):
-            for s in range(1, num_stage):
+            for s in range(num_stage):
                 # starting from s=1 since the values with s=0 are loaded
                 (self.dpqa).add(x[q][s] >= 0)
                 (self.dpqa).add(x[q][s] < self.n_x)
@@ -720,7 +720,7 @@ class DPQA:
                                         partial solutions:
 
         full solution:                    ----------- x/y_0
-                                            | a/c/r_0 |
+                                          | a/c/r_0 |
         ----------- x/y_0  <-----------   ----------- x/y_1
         | a/c/r_0 |  <-----------------   | a/c/r_1 |
         ----------- x/y_1  <-----------   ----------- x/y_2  ----
@@ -729,8 +729,8 @@ class DPQA:
         | a/c/r_2 |  <---------.  \ \                           | 
         ----------- x/y_3       \  \ \    ----------- x/y_0  <---
         | a/c/r_3 |              \  \ \-  | a/c/r_0 |
-                                    \  \--  ----------- x/y_1
-                                    \----  | a/c/r_1 |
+                                  \  \--  ----------- x/y_1
+                                   \----  | a/c/r_1 |
                                             ...
         
         just above, we prepared a Dict `layer` that looks like
@@ -804,20 +804,22 @@ class DPQA:
             self.setNoTransfer()
 
     def get_front_layer(self):
+        if self.all_commutable:
+            return
+        
         new_idx = []
         self.non_front_g_q = []
         self.non_front_g_s = []
         self.non_front_g_i = []
-        free_q = [1 for _ in range(self.n_q)]
+        all_dest = [d for (_, d) in self.dependencies]
         for g in range(self.n_g):
-            if free_q[self.g_q[g][0]] and free_q[self.g_q[g][1]]:
+            if g not in all_dest:
                 new_idx.append(g)
-                free_q[self.g_q[g][0]] = 0
-                free_q[self.g_q[g][1]] = 0
             else:
                 self.non_front_g_q.append(self.g_q[g])
                 self.non_front_g_s.append(self.g_s[g])
                 self.non_front_g_i.append(self.g_i[g])
+
 
         self.g_q = [self.g_q[g] for g in new_idx]
         self.g_s = [self.g_s[g] for g in new_idx]
@@ -829,11 +831,12 @@ class DPQA:
         self.dependencies = dependencyExtract(self.g_q, self.n_q)
 
     def solve_greedy(self, step: int,):
-        a, c, r, x, y = self.solver_init(step+1)
         total_g_q = len(self.g_q)
         t_curr = 1
 
         while len(self.g_q) > self.optimal_ratio * total_g_q:
+            step = 1
+            a, c, r, x, y = self.solver_init(step+1)
             self.get_front_layer()
             print(f"gate batch {t_curr}")
 
@@ -854,7 +857,15 @@ class DPQA:
                 (self.dpqa).pop()  # pop to reduce gate bound
                 bound_gate -= 1
                 if bound_gate <= 0:
-                    raise ValueError('gate card should > 0')
+                    if self.print_detail:
+                        print(f"    no solution, step={step} too small")
+                    step = 2
+                    a, c, r, x, y = self.solver_init(step + 1)  # self.dpqa is cleaned
+                    (self.dpqa).push()  # gate related constraints
+                    t = self.constraint_gate_batch(step + 1, c, r, x, y)
+                    if self.print_detail:
+                        print(self.g_q)
+                    bound_gate = 1
 
                 (self.dpqa).push()  # new gate bound
                 self.constraint_gate_card(bound_gate, step+1, t)
