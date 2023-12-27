@@ -24,7 +24,7 @@ Explaination of `run.py`:
   - Optionally, you can specify the directory for this file with argument `dir`.
   - There is another optional argument `print_detail` to specify the granularity of printout.
 - We need to specify the architecture with `setArchitecture` method of `DPQA`. It takes in a list of 4 numbers, which are the number of columns of interaction sites, the number of rows of interaction sites, the number of AOD columns, and the number of AOD rows.
-- We need to specify the two-qubit gates in a list with `setProgram` method of `DPQA`. For example, a circuit CNOT(0,1), CNOT(1,2), CNOT(0,1) will be `[[0,1], [1,2], [0,1]]`.
+- We need to specify the two-qubit gates in a list with `setProgram` method of `DPQA`. For example, a circuit CZ(0,1), CZ(1,2), CZ(0,1) will be `[[0,1], [1,2], [0,1]]`.
 - If all the gates are commutable with each other (e.g., the two-qubit gates in an iteration of QAOA), call the `setCommutation` method of `DPQA`. Otherwise, do not call it and the compiler will process the gates considering dependency.
 - We can set the ratio of switching from interative peeling to optimal (multi-stage) solving with `setOptimalRatio` method of `DPQA`. By default, the ratio is 0.
 - Finally, we can solve the formulated SMT problem with the `solve` method of `DPQA`.
