@@ -15,7 +15,7 @@ Repo structure:
 How to use the compiler:
 - We used a Python 3 environment with `z3-solver`, `networkx`, and `python-sat`, and `matplotlib`. The Python scripts are run in the root directory of the repo.
 - Run `python run.py <S> <I>` where `<S>` is the size of the random 3-regular graph, `<I>` is the id of the graph. To try other graphs, please edit `run.py` as needed.
-- The specific runtimes can differ because of the hardware, environment, and updates of this repo. Please refer to branch(es) of this repo for specific versions corresponding to the paper(s), e.g., [2306.03487rev1](https://github.com/UCLA-VAST/DPQA/tree/2306.03487rev1)
+- The specific runtimes can differ because of the hardware, environment, and updates of this repo. Please refer to branch(es) of this repo for specific versions corresponding to the paper(s), e.g., [arxiv2306.03487](https://github.com/UCLA-VAST/DPQA/tree/arxiv2306.03487)
 - (Optional) To generate animation, run `python animation.py <F>` where `<F>` is the SMT output file, e.g., `results/smt/rand3reg_90_4.json`.
 
 Explaination of `run.py`:
