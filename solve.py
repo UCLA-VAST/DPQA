@@ -798,8 +798,7 @@ class DPQA:
     def hybrid_strategy(self):
         # default strategy for hybrid solving: if n_q <30, use optimal solving
         # i.e., optimal_ratio=1 with no transfer; if n_q >= 30, last 5% optimal
-        if self.optimal_ratio == None:
-            self.setOptimalRatio(1 if self.n_q < 30 else 0.05)
+        self.setOptimalRatio(1 if self.n_q < 30 else 0.05)
         if self.optimal_ratio == 1 and self.n_q < 30:
             self.setNoTransfer()
 
