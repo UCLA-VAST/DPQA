@@ -9,12 +9,12 @@ from abc import ABC, abstractmethod
 
 
 # physics constants
-R_B = 6  # rydberg range
-AOD_SEP = 2  # min AOD separation
-RYD_SEP = 15  # sufficient distance to avoid Rydberg
+R_B = 2 #6  # rydberg range
+AOD_SEP = 1 #2  # min AOD separation
+RYD_SEP = 10 #15  # sufficient distance to avoid Rydberg
 SITE_SLMS = 2  # number of SLMs in a site
 SLM_SEP = AOD_SEP  # separation of SLMs inside a site
-SITE_WIDTH = 4  # total width of SLMs in a site
+SITE_WIDTH = 2 #4  # total width of SLMs in a site
 X_SITE_SEP = RYD_SEP + SITE_WIDTH  # separation of sites in X direction
 Y_SITE_SEP = RYD_SEP  # separation of sites in Y direction
 
@@ -586,6 +586,9 @@ class Activate(Inst):
             row_ys: Sequence[int],
             pickup_qs: Sequence[int],
     ):
+        print("in verify 1")
+        print("active_xs: ", [col.x for col in col_objs if col.active])
+        print("active_xs_id: ", [i for i, col in enumerate(col_objs) if col.active])
         a = len(col_idx)
         b = len(col_xs)
         if a != b:
@@ -641,6 +644,10 @@ class Activate(Inst):
         active_xys = []  # the traps that are newly activted by this Activate
         active_xs = [col.x for col in col_objs if col.active]
         active_ys = [row.y for row in row_objs if row.active]
+        print("in verify 2")
+        print("active_xs: ", active_xs)
+        print("active_xs_id: ", [i for i, col in enumerate(col_objs) if col.active])
+        
         for x in active_xs:
             for y in row_ys:
                 active_xys.append((x, y))
@@ -661,6 +668,7 @@ class Activate(Inst):
                         f'x={qubit_objs[q_id].x} y={qubit_objs[q_id].y}.'
                     )
             else:
+                # !
                 if (qubit_objs[q_id].x, qubit_objs[q_id].y) in active_xys:
                     raise ValueError(
                         f'{self.name}: q {q_id} wrongfully picked up by '
@@ -932,6 +940,7 @@ class ReloadRow(ComboInst):
         self.moving_cols_end = []
 
     def add_col_shift(self, id: int, begin: int, end: int):
+        print("add col shift")
         self.moving_cols_id.append(id)
         self.moving_cols_begin.append(begin)
         self.moving_cols_end.append(end)
@@ -941,7 +950,11 @@ class ReloadRow(ComboInst):
             col_objs: Sequence[Col],
             row_objs: Sequence[Row],
             qubit_objs: Sequence[Qubit],
-    ):
+    ):  
+        print("in generate_col_shift")
+        print("self.moving_cols_id: ", self.moving_cols_id)
+        print("self.moving_cols_begin: ", self.moving_cols_begin)
+        print("self.moving_cols_end: ", self.moving_cols_end)
         self.insts.append(
             Move(s=self.stage,
                  col_objs=col_objs,
@@ -1429,6 +1442,11 @@ class CodeGen():
         init = self.builder_init(cols, rows, qubits, program)  # has Rydberg_0
 
         for s in range(1, len(self.layers)):
+            print("s: ", s)
+            print("self.layers[s]: ", self.layers[s])
+            if s == 12:
+                print("self.program]: ", program.emit_full()[-1])
+            
             self.builder_swap(s, cols, rows, qubits, program)
 
             if (not no_transfer) or s == 1:
@@ -1627,6 +1645,8 @@ class CodeGen():
         # reload row by row
         for row_id in range(self.r_high):
             if layer['row'][row_id]['qs']:  # there are qubits to load
+                print("\n\nrow_id: ", row_id)
+                print("load: ", layer['row'][row_id]['qs'])
                 reloadRow_obj = reload_obj.add_row_reload(row_id)
                 pickup_qs = []
                 cols_to_active = []
@@ -1645,6 +1665,7 @@ class CodeGen():
 
                     # shift the 1 or 2 cols that are picking up qubits
                     if len(site_qs) == 2:
+                        print("case 1663")
                         # which qubit is on the left and which on the right
                         [q_id_left, q_id_right] = site_qs
                         if layer['qubits'][q_id_left]['c'] >\
@@ -1686,6 +1707,7 @@ class CodeGen():
                                 end=upper_x)
 
                     elif len(site_qs) == 1:
+                        print("case 1705")
                         # for convience later on, we still keep the *_left and
                         # *_right vars even if there is one qubit to pick up
                         q_id = site_qs[0]
@@ -1697,9 +1719,11 @@ class CodeGen():
                         lower_x = qubits[q_id].x
                         upper_x = lower_x
                         if not cols[col_id_left].active:
+                            print("case 1717")
                             cols_to_active.append(col_id_left)
                             x_to_activate.append(lower_x)
                         else:  # col already active, shift it to align with q_id
+                            print("case 1721, begin: {}, end: {}".format(cols[col_id_left].x, lower_x))
                             reloadRow_obj.add_col_shift(
                                 id=col_id_left,
                                 begin=cols[col_id_left].x,
@@ -1730,6 +1754,7 @@ class CodeGen():
                             # if there is a col on the right of the cols for loading
                             if layer['col'][col_id]['offset_begin'] >\
                                     upper_offset:
+                                print("case 1757")
                                 reloadRow_obj.add_col_shift(
                                     id=col_id,
                                     begin=cols[col_id].x,
@@ -1740,6 +1765,8 @@ class CodeGen():
                             # if there is a col on the left of the cols for loading
                             elif layer['col'][col_id]['offset_begin'] <\
                                     lower_offset:
+                                print("case 1767")
+                                print("col_id: {}, col_id_left: {}, col_id_right: {}", col_id, col_id_left, col_id_right)
                                 reloadRow_obj.add_col_shift(
                                     id=col_id,
                                     begin=cols[col_id].x,
@@ -1748,6 +1775,7 @@ class CodeGen():
                                      lower_offset) - 1)
                             # if there is a col in the middle of the cols for loading
                             else:
+                                print("case 1777")
                                 reloadRow_obj.add_col_shift(
                                     id=col_id,
                                     begin=cols[col_id].x,
@@ -1757,8 +1785,17 @@ class CodeGen():
 
                     pickup_qs += site_qs
 
+                print("cols_to_active: ", cols_to_active)
+                print("x_to_activate: ", x_to_activate)
+                print("layer['row'][row_id]['y_begin']*Y_SITE_SEP: ", layer['row'][row_id]['y_begin']*Y_SITE_SEP)
+                print("active_xs_id: ", [i for i, col in enumerate(cols) if col.active])
+                print("active_xs: ", [col.x for col in cols if col.active])
+                print("ori col x x: ", [cols[col].x for col in cols_to_active])
                 # apply all the col shifts added previously
                 reloadRow_obj.generate_col_shift(cols, rows, qubits)
+                print("line 1783")
+                print("active_xs_id: ", [i for i, col in enumerate(cols) if col.active])
+                print("active_xs: ", [col.x for col in cols if col.active])
                 reloadRow_obj.generate_row_activate(
                     cols,
                     rows,
@@ -1784,6 +1821,8 @@ class CodeGen():
                 col_end = [1 + layer['col'][col_id]['x_begin'] * X_SITE_SEP +
                            AOD_SEP * layer['col'][col_id]['offset_begin']
                            for col_id in col_idx]
+                print("col_begin: ", col_begin)
+                print("col_end: ", col_end)
                 reloadRow_obj.generate_parking(
                     cols,
                     rows,
