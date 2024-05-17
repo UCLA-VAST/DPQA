@@ -9,12 +9,10 @@ from abc import ABC, abstractmethod
 
 
 # physics constants
-R_B = 6  # rydberg range
-AOD_SEP = 2  # min AOD separation
-RYD_SEP = 15  # sufficient distance to avoid Rydberg
-SITE_SLMS = 2  # number of SLMs in a site
-SLM_SEP = AOD_SEP  # separation of SLMs inside a site
-SITE_WIDTH = 4  # total width of SLMs in a site
+R_B = 2 #6  # rydberg range
+AOD_SEP = 1 #2  # min AOD separation
+RYD_SEP = 10 #15  # sufficient distance to avoid Rydberg
+SITE_WIDTH = 2 * AOD_SEP #4  # total width of SLMs in a site
 X_SITE_SEP = RYD_SEP + SITE_WIDTH  # separation of sites in X direction
 Y_SITE_SEP = RYD_SEP  # separation of sites in Y direction
 
@@ -641,6 +639,7 @@ class Activate(Inst):
         active_xys = []  # the traps that are newly activted by this Activate
         active_xs = [col.x for col in col_objs if col.active]
         active_ys = [row.y for row in row_objs if row.active]
+        
         for x in active_xs:
             for y in row_ys:
                 active_xys.append((x, y))
@@ -661,6 +660,7 @@ class Activate(Inst):
                         f'x={qubit_objs[q_id].x} y={qubit_objs[q_id].y}.'
                     )
             else:
+                # !
                 if (qubit_objs[q_id].x, qubit_objs[q_id].y) in active_xys:
                     raise ValueError(
                         f'{self.name}: q {q_id} wrongfully picked up by '
@@ -941,7 +941,7 @@ class ReloadRow(ComboInst):
             col_objs: Sequence[Col],
             row_objs: Sequence[Row],
             qubit_objs: Sequence[Qubit],
-    ):
+    ):  
         self.insts.append(
             Move(s=self.stage,
                  col_objs=col_objs,
@@ -1429,6 +1429,7 @@ class CodeGen():
         init = self.builder_init(cols, rows, qubits, program)  # has Rydberg_0
 
         for s in range(1, len(self.layers)):
+            
             self.builder_swap(s, cols, rows, qubits, program)
 
             if (not no_transfer) or s == 1:
@@ -1730,22 +1731,32 @@ class CodeGen():
                             # if there is a col on the right of the cols for loading
                             if layer['col'][col_id]['offset_begin'] >\
                                     upper_offset:
-                                reloadRow_obj.add_col_shift(
+                                if layer['col'][col_id]['offset_begin'] - upper_offset == 1:
+                                    reloadRow_obj.add_col_shift(
                                     id=col_id,
                                     begin=cols[col_id].x,
-                                    end=upper_x + AOD_SEP *
-                                    (layer['col'][col_id]['offset_begin'] -
-                                     upper_offset) + 1)
+                                    end=upper_x + AOD_SEP)
+                                elif layer['col'][col_id]['offset_begin'] - upper_offset == 2:
+                                    reloadRow_obj.add_col_shift(
+                                    id=col_id,
+                                    begin=cols[col_id].x,
+                                    end=upper_x + AOD_SEP * 3)
+                                
 
                             # if there is a col on the left of the cols for loading
                             elif layer['col'][col_id]['offset_begin'] <\
                                     lower_offset:
-                                reloadRow_obj.add_col_shift(
+                                if layer['col'][col_id]['offset_begin'] - lower_offset == -1:
+                                    reloadRow_obj.add_col_shift(
                                     id=col_id,
                                     begin=cols[col_id].x,
-                                    end=lower_x + AOD_SEP *
-                                    (layer['col'][col_id]['offset_begin'] -
-                                     lower_offset) - 1)
+                                    end=lower_x - AOD_SEP)
+                                elif layer['col'][col_id]['offset_begin'] - lower_offset == -2:
+                                    reloadRow_obj.add_col_shift(
+                                    id=col_id,
+                                    begin=cols[col_id].x,
+                                    end=lower_x - 3 * AOD_SEP)
+                                
                             # if there is a col in the middle of the cols for loading
                             else:
                                 reloadRow_obj.add_col_shift(
