@@ -1792,8 +1792,9 @@ class CodeGen():
                 col_idx = [col_id for col_id,
                            col in enumerate(cols) if col.active]
                 col_begin = [cols[col_id].x for col_id in col_idx]
-                col_end = [1 + layer['col'][col_id]['x_begin'] * X_SITE_SEP +
-                           AOD_SEP * layer['col'][col_id]['offset_begin']
+                tmp_shift = {0: -AOD_SEP, 1: AOD_SEP, 2: 3*AOD_SEP}
+                col_end = [layer['col'][col_id]['x_begin'] * X_SITE_SEP +
+                           tmp_shift[layer['col'][col_id]['offset_begin']]
                            for col_id in col_idx]
                 reloadRow_obj.generate_parking(
                     cols,
