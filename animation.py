@@ -12,9 +12,7 @@ from abc import ABC, abstractmethod
 R_B = 2 #6  # rydberg range
 AOD_SEP = 1 #2  # min AOD separation
 RYD_SEP = 10 #15  # sufficient distance to avoid Rydberg
-SITE_SLMS = 2  # number of SLMs in a site
-SLM_SEP = AOD_SEP  # separation of SLMs inside a site
-SITE_WIDTH = 2 #4  # total width of SLMs in a site
+SITE_WIDTH = 2 * AOD_SEP #4  # total width of SLMs in a site
 X_SITE_SEP = RYD_SEP + SITE_WIDTH  # separation of sites in X direction
 Y_SITE_SEP = RYD_SEP  # separation of sites in Y direction
 
@@ -1755,24 +1753,34 @@ class CodeGen():
                             if layer['col'][col_id]['offset_begin'] >\
                                     upper_offset:
                                 print("case 1757")
-                                reloadRow_obj.add_col_shift(
+                                if layer['col'][col_id]['offset_begin'] - upper_offset == 1:
+                                    reloadRow_obj.add_col_shift(
                                     id=col_id,
                                     begin=cols[col_id].x,
-                                    end=upper_x + AOD_SEP *
-                                    (layer['col'][col_id]['offset_begin'] -
-                                     upper_offset) + 1)
+                                    end=upper_x + AOD_SEP)
+                                elif layer['col'][col_id]['offset_begin'] - upper_offset == 2:
+                                    reloadRow_obj.add_col_shift(
+                                    id=col_id,
+                                    begin=cols[col_id].x,
+                                    end=upper_x + AOD_SEP * 3)
+                                
 
                             # if there is a col on the left of the cols for loading
                             elif layer['col'][col_id]['offset_begin'] <\
                                     lower_offset:
                                 print("case 1767")
                                 print("col_id: {}, col_id_left: {}, col_id_right: {}", col_id, col_id_left, col_id_right)
-                                reloadRow_obj.add_col_shift(
+                                if layer['col'][col_id]['offset_begin'] - lower_offset == -1:
+                                    reloadRow_obj.add_col_shift(
                                     id=col_id,
                                     begin=cols[col_id].x,
-                                    end=lower_x + AOD_SEP *
-                                    (layer['col'][col_id]['offset_begin'] -
-                                     lower_offset) - 1)
+                                    end=lower_x - AOD_SEP)
+                                elif layer['col'][col_id]['offset_begin'] - lower_offset == -2:
+                                    reloadRow_obj.add_col_shift(
+                                    id=col_id,
+                                    begin=cols[col_id].x,
+                                    end=lower_x - 3 * AOD_SEP)
+                                
                             # if there is a col in the middle of the cols for loading
                             else:
                                 print("case 1777")
